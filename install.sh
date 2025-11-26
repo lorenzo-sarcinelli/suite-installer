@@ -1,1119 +1,684 @@
 #!/usr/bin/env bash
 
 #==============================================================================
-# THE - Complete Stack Installer v3.0 FINAL
-# Docker 29+ + Swarm + Traefik v2.10 + SSL + Portainer + PostgreSQL + MySQL + N8N
-# Compatível: Debian 12/13
-# Testado e validado - SSL automático funcionando
+# INSTALLER V1.0 - Tracking Highend Production Stack (Compose + .env)
+# Status: Versão de Lançamento Final com Fixes de Estabilidade e Automação.
+# Objetivo: Deploy rápido de um Cluster N8N (Queue Mode) com Traefik (SSL) e DBs.
 #==============================================================================
 
+# Interrompe o script imediatamente se qualquer comando falhar.
 set -e
 
-# Cores
+# Cores e Formatação (Para melhor visualização no terminal)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
+BOLD='\033[1m'
+BLUE='\033[0;34m'
 
-# Variáveis Globais
-TRAEFIK_VERSION="v2.10"
-PORTAINER_VERSION="latest"
-N8N_VERSION="latest"
-POSTGRES_VERSION="15"
-MYSQL_VERSION="8.0"
-PHPMYADMIN_VERSION="latest"
-
-# Banner
-clear
-echo -e "${BLUE}"
-cat << "EOF"
- _____ _   _ _____ 
-|_   _| | | | ____|
-  | | | |_| |  _|  
-  | | |  _  | |___ 
-  |_| |_| |_|_____|
-                   
-THE Stack Installer v3.0 FINAL
-Instalação completa com SSL automático
-EOF
-echo -e "${NC}"
+# Variáveis de Versão e Diretório
+DOCKER_UBUNTU_VER="5:27.5.1-1~ubuntu.24.04~noble" # Versão específica para Ubuntu 24.04
+DOCKER_FALLBACK_VER="5:27.5.1"                     # Versão de fallback para Debian
+INSTALL_DIR="/opt/stack"                           # Diretório base para os arquivos de configuração
 
 #==============================================================================
-# Funções Auxiliares
+# Funções Auxiliares e Display
 #==============================================================================
 
-log_info() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[✗]${NC} $1"
-    exit 1
-}
-
+# Funções de Log customizadas
+log_info() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 log_step() {
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${MAGENTA}▶ $1${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
+    echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}▶ $1${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 }
 
-generate_password() {
-    openssl rand -base64 16 | tr -d "=+/" | cut -c1-16
+# FUNÇÃO: Pausa Automática (Auto-Continue)
+auto_continue() {
+    local seconds=3
+    echo -e "\n${YELLOW}${BOLD}>> PAUSA AUTOMÁTICA: Continuando em $seconds segundos... (Pressione Ctrl+C para cancelar)${NC}"
+    sleep $seconds
+    clear # Limpa a tela para a próxima etapa
 }
 
-generate_hash() {
-    openssl rand -hex 8
+# FUNÇÃO: Banner e Resumo Inicial
+main_preamble() {
+    clear
+    echo -e "${MAGENTA}${BOLD}"
+    cat << "EOF"
+████████╗██╗  ██╗███████╗    ███████╗████████╗ █████╗  ██████╗██╗  ██╗
+╚══██╔══╝██║  ██║██╔════╝    ██╔════╝╚══██╔══╝██╔══██╗██╔════╝██║ ██╔╝
+   ██║   ███████║█████╗      ███████╗   ██║   ███████║██║     █████╔╝
+   ██║   ██║  ██║██╔══╝      ╚════██║   ██║   ██╔══██║██║     ██╔═██╗
+   ██║   ██║  ██║███████╗    ███████║   ██║   ██║  ██║╚██████╗██║  ██╗
+   ╚═╝   ╚═╝  ╚═╝╚══════╝    ╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝
+
+Tracking Highend - Master Installer (V1.0)
+EOF
+    echo -e "${NC}"
+
+    echo -e "* ${RED}AVISO:${NC} antes de executar, libere os subdominios para instalação"
+    echo -e "* ${YELLOW}SubDominios:${NC} n8n, traefik, portainer, webhook, pma"
+
+    echo -e "\n${YELLOW}${BOLD}SETUP RESUMO:${NC}"
+    echo -e "--------------------------------------------------------"
+    echo -e "* ${GREEN}Orquestrador:${NC} Docker Compose"
+    echo -e "* ${GREEN}Reverse Proxy:${NC} Traefik (v3) com Let's Encrypt (SSL/HTTPS)"
+    echo -e "* ${GREEN}Serviços Principais:${NC} N8N (Editor, Webhook, Worker) em modo Cluster/Queue"
+    echo -e "* ${GREEN}Bancos de Dados:${NC} PostgreSQL (N8N) e MySQL (Dados, porta 3306) + phpMyAdmin"
+    echo -e "* ${GREEN}Gerenciador:${NC} Portainer (Web UI)"
+    echo -e "--------------------------------------------------------"
+    echo -e "${NC}"
+    echo -e "${RED}${BOLD}PRÉ-REQUISITO:${NC} Execute como ROOT e configure o DNS antes do deploy."
+    echo -e "\n${YELLOW}${BOLD}Pressione ENTER para iniciar a configuração dos domínios...${NC}"
 }
 
-check_root() {
-    if [ "$(id -u)" -ne 0 ]; then 
-        log_error "Execute como root: sudo bash $0"
+# FUNÇÃO: Verifica se as portas 80, 443 e 3306 estão livres.
+check_ports() {
+    log_step "VERIFICANDO PORTAS (80, 443, 3306 e 5678)"
+
+    # Verifica portas 80 (HTTP) e 443 (HTTPS)
+    if lsof -i :80 > /dev/null 2>&1 || lsof -i :443 > /dev/null 2>&1; then
+        log_warn "Portas 80 ou 443 em uso. Tentando parar serviços conflitantes (apache/nginx)..."
+        systemctl stop apache2 2>/dev/null || true
+        systemctl disable apache2 2>/dev/null || true
+        systemctl stop nginx 2>/dev/null || true
+        systemctl disable nginx 2>/dev/null || true
     fi
-}
 
-check_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS=$ID
-        VER=$VERSION_ID
-        
-        if [[ "$OS" != "debian" ]]; then
-            log_error "Sistema não suportado. Use Debian 12 ou 13"
-        fi
-        
-        if [[ "$VER" != "12" && "$VER" != "13" ]]; then
-            log_error "Versão não suportada. Use Debian 12 ou 13"
-        fi
-        
-        log_info "Sistema detectado: Debian $VER"
-    else
-        log_error "Não foi possível detectar o sistema operacional"
+    # Verifica porta 3306 (MySQL)
+    if lsof -i :3306 > /dev/null 2>&1; then
+        log_warn "A porta 3306 (MySQL/MariaDB) está em uso no host. O MySQL do Docker pode ter conflitos."
     fi
+
+    # Verifica porta 5678 (N8N Editor - Exposta por solicitação)
+    if lsof -i :5678 > /dev/null 2>&1; then
+        log_warn "A porta 5678 (N8N Editor) está em uso no host. O Editor do Docker não será acessível diretamente por esta porta."
+    fi
+
+    log_info "Verificação de portas concluída."
 }
 
-wait_for_service() {
-    local service_name=$1
-    local max_wait=$2
-    local waited=0
-    
-    echo -n "Aguardando $service_name "
-    while [ $waited -lt $max_wait ]; do
-        if docker service ls | grep -q "$service_name.*1/1"; then
-            echo ""
-            log_info "$service_name está rodando"
-            return 0
+# FUNÇÃO: Atualiza o sistema e instala dependências básicas.
+install_base_deps() {
+    clear
+    log_step "ETAPA 1/3: ATUALIZANDO SISTEMA BASE E INSTALANDO PRÉ-REQUISITOS"
+
+    log_info "Executando apt update e upgrade..."
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
+
+    log_info "Instalando dependências essenciais (curl, gnupg, htpasswd)..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg lsb-release apache2-utils
+
+    log_info "Sistema base pronto."
+}
+
+#==============================================================================
+# 2. Coleta de Dados e Geração/Leitura de Segredos (Persistência)
+#==============================================================================
+
+collect_info() {
+    log_step "CONFIGURAÇÃO DE DOMÍNIOS E SEGREDOS"
+
+    # 2.1. Coleta de Domínio Base (Interativa)
+    while true; do
+        echo -n "Domínio principal (ex: empresa.com.br): "
+        read -r BASE_DOMAIN
+        if [[ "$BASE_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+            break
+        else
+            echo -e "${RED}Formato inválido. Ex: nome.com.br${NC}"
         fi
-        echo -n "."
-        sleep 2
-        waited=$((waited + 2))
     done
-    echo ""
-    log_warn "$service_name pode não ter iniciado completamente"
-    return 1
-}
 
-#==============================================================================
-# Coleta de Informações
-#==============================================================================
+    # 2.2. Coleta de Subdomínios (Interativa com Padrão)
+    echo -e "\n${CYAN}Definição de Subdomínios (Enter para manter o padrão):${NC}"
 
-collect_domains() {
-    log_step "CONFIGURAÇÃO DE DOMÍNIOS"
-    
-    echo -n "Domínio principal (ex: empresa.com.br): "
-    read -r BASE_DOMAIN
-    
-    if [ -z "$BASE_DOMAIN" ]; then
-        log_error "Domínio principal é obrigatório"
-    fi
-    
-    echo ""
-    echo -e "${CYAN}Subdomínios (pressione Enter para usar o padrão):${NC}"
-    echo ""
-    
-    echo -n "Portainer [portainer]: "
-    read -r SUB_PORTAINER
+    read -p "Traefik Dashboard [traefik.$BASE_DOMAIN]: " SUB_TRAEFIK
+    SUB_TRAEFIK=${SUB_TRAEFIK:-traefik}
+    DOMAIN_TRAEFIK="${SUB_TRAEFIK}.${BASE_DOMAIN}"
+
+    read -p "Portainer       [portainer.$BASE_DOMAIN]: " SUB_PORTAINER
     SUB_PORTAINER=${SUB_PORTAINER:-portainer}
     DOMAIN_PORTAINER="${SUB_PORTAINER}.${BASE_DOMAIN}"
-    
-    echo -n "phpMyAdmin [phpmyadmin]: "
-    read -r SUB_PHPMYADMIN
-    SUB_PHPMYADMIN=${SUB_PHPMYADMIN:-phpmyadmin}
-    DOMAIN_PHPMYADMIN="${SUB_PHPMYADMIN}.${BASE_DOMAIN}"
-    
-    echo -n "N8N [n8n]: "
-    read -r SUB_N8N
+
+    read -p "N8N Editor      [n8n.$BASE_DOMAIN]: " SUB_N8N
     SUB_N8N=${SUB_N8N:-n8n}
     DOMAIN_N8N="${SUB_N8N}.${BASE_DOMAIN}"
-    
-    echo -n "Webhook N8N [webhook]: "
-    read -r SUB_WEBHOOK
-    SUB_WEBHOOK=${SUB_WEBHOOK:-webhook}
-    DOMAIN_WEBHOOK="${SUB_WEBHOOK}.${BASE_DOMAIN}"
-    
-    echo -n "Email para SSL [admin@${BASE_DOMAIN}]: "
-    read -r EMAIL_SSL
-    EMAIL_SSL=${EMAIL_SSL:-admin@${BASE_DOMAIN}}
-    
-    echo ""
-    log_info "Domínios configurados:"
-    echo -e "  ${BLUE}Portainer:${NC}   https://${DOMAIN_PORTAINER}"
-    echo -e "  ${BLUE}phpMyAdmin:${NC}  https://${DOMAIN_PHPMYADMIN}"
-    echo -e "  ${BLUE}N8N:${NC}         https://${DOMAIN_N8N}"
-    echo -e "  ${BLUE}Webhook:${NC}     https://${DOMAIN_WEBHOOK}"
-    echo ""
-}
 
-generate_credentials() {
-    log_step "GERANDO CREDENCIAIS SEGURAS"
-    
-    POSTGRES_PASSWORD=$(generate_password)
-    MYSQL_ROOT_PASSWORD=$(generate_password)
-    N8N_DB_NAME="n8n_$(generate_hash)"
-    N8N_ENCRYPTION_KEY=$(generate_password)
-    REDIS_PASSWORD=$(generate_password)
-    
-    log_info "Todas as credenciais foram geradas"
+    read -p "N8N Webhook     [webhook.$BASE_DOMAIN]: " SUB_N8N_WEBHOOK
+    SUB_N8N_WEBHOOK=${SUB_N8N_WEBHOOK:-webhook}
+    DOMAIN_N8N_WEBHOOK="${SUB_N8N_WEBHOOK}.${BASE_DOMAIN}"
+
+    read -p "phpMyAdmin      [pma.$BASE_DOMAIN]: " SUB_PMA
+    SUB_PMA=${SUB_PMA:-pma}
+    DOMAIN_PMA="${SUB_PMA}.${BASE_DOMAIN}"
+
+    read -p "Email para SSL  [admin@$BASE_DOMAIN]: " EMAIL_SSL_VAL
+    EMAIL_SSL_VAL=${EMAIL_SSL_VAL:-admin@${BASE_DOMAIN}}
+
+
+    # 2.3. Lógica de Persistência de Segredos
+    ENV_FILE="$INSTALL_DIR/.env"
+
+    if [ -f "$ENV_FILE" ]; then
+        log_warn "Arquivo .env existente. Reutilizando chaves de criptografia e senhas DB/Redis para ${BOLD}evitar perda de dados no N8N${NC}."
+
+        # Carrega variáveis existentes para reutilização
+        source "$ENV_FILE"
+
+        POSTGRES_PASSWORD_N8N_VAL="${POSTGRES_PASSWORD_N8N}"
+        MYSQL_ROOT_PASSWORD_VAL="${MYSQL_ROOT_PASSWORD}"
+        MYSQL_USER_PASSWORD_VAL="${MYSQL_USER_PASSWORD}"
+        N8N_ENCRYPTION_KEY_VAL="${N8N_ENCRYPTION_KEY}"
+        REDIS_PASSWORD_VAL="${REDIS_PASSWORD}"
+        TRAEFIK_DASH_PASS_RAW="${TRAEFIK_DASH_PASS_RAW}"
+        TRAEFIK_BASIC_AUTH_VAL="${TRAEFIK_BASIC_AUTH}"
+
+    else
+        log_info "Gerando novos segredos criptográficos (primeira execução)..."
+        # Geração de Senhas e Chaves
+        POSTGRES_PASSWORD_N8N_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+        MYSQL_ROOT_PASSWORD_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+        MYSQL_USER_PASSWORD_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+        N8N_ENCRYPTION_KEY_VAL=$(openssl rand -base64 24)
+        REDIS_PASSWORD_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
+
+        # Geração de Senha para Traefik Dashboard (Basic Auth)
+        TRAEFIK_DASH_PASS_RAW=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-12)
+
+        if command -v htpasswd >/dev/null; then
+            # Cria hash htpasswd (substituindo $ por $$ para o docker compose ler corretamente)
+            TRAEFIK_BASIC_AUTH_VAL=$(htpasswd -nb admin "$TRAEFIK_DASH_PASS_RAW" | sed 's/\$/\$\$/g')
+        else
+            log_warn "htpasswd não encontrado. Usando hash padrão."
+            TRAEFIK_BASIC_AUTH_VAL="admin:\$\$apr1\$\$5Uqb5YDD\$\$QuT0/wmWT/xporevFvdwm0"
+        fi
+    fi
 }
 
 #==============================================================================
-# Instalação Base do Sistema
+# 3. Instalação Docker (Versão Específica)
 #==============================================================================
-
-setup_swap() {
-    log_step "CONFIGURANDO SWAP 4GB"
-    
-    if [ -f /swapfile ]; then
-        log_warn "Swap já existe, pulando..."
-        return
-    fi
-    
-    fallocate -l 4G /swapfile
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
-    
-    if ! grep -q '/swapfile' /etc/fstab; then
-        echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    fi
-    
-    log_info "Swap de 4GB configurado"
-}
-
-install_dependencies() {
-    log_step "INSTALANDO DEPENDÊNCIAS"
-    
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release \
-        apt-transport-https \
-        software-properties-common \
-        ufw \
-        htop \
-        net-tools \
-        apache2-utils \
-        dnsutils \
-        wget > /dev/null 2>&1
-    
-    log_info "Dependências instaladas"
-}
 
 install_docker() {
-    log_step "INSTALANDO DOCKER ENGINE (ÚLTIMA VERSÃO)"
-    
-    # Remover completamente versões antigas
-    apt-get remove -y docker docker-engine docker.io containerd runc docker-ce docker-ce-cli 2>/dev/null || true
-    apt-get autoremove -y 2>/dev/null || true
-    
-    # Limpar repositórios antigos
-    rm -f /etc/apt/sources.list.d/docker.list
-    rm -rf /etc/apt/keyrings/docker.gpg
-    
-    # Adicionar repositório oficial
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
-      $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
-    # Atualizar e instalar
-    apt-get update -qq
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    
-    # Iniciar e habilitar
-    systemctl enable docker
-    systemctl start docker
-    
-    # Verificar versão
-    DOCKER_VERSION=$(docker version --format '{{.Server.Version}}')
-    DOCKER_API=$(docker version --format '{{.Server.APIVersion}}')
-    
-    log_info "Docker $DOCKER_VERSION instalado (API $DOCKER_API)"
-    
-    # Validar versão da API
-    if [[ "$DOCKER_API" < "1.44" ]]; then
-        log_error "Docker API muito antiga ($DOCKER_API). Necessário 1.44+. Tente reiniciar o servidor."
-    fi
-}
+    log_step "ETAPA 2/3: INSTALANDO DOCKER (Versão Fixa: ${DOCKER_FALLBACK_VER})"
 
-setup_docker_swarm() {
-    log_step "INICIALIZANDO DOCKER SWARM"
-    
+    # Remove qualquer instalação anterior (swarm, pacotes)
     if docker info 2>/dev/null | grep -q "Swarm: active"; then
-        log_warn "Swarm já está ativo"
-        return
+        log_warn "Removendo Swarm antigo..."
+        docker swarm leave --force 2>/dev/null || true
     fi
-    
-    SWARM_IP=$(hostname -I | awk '{print $1}')
-    docker swarm init --advertise-addr "$SWARM_IP"
-    
-    log_info "Swarm inicializado em $SWARM_IP"
-}
 
-create_networks() {
-    log_step "CRIANDO REDES DOCKER"
-    
-    if docker network ls | grep -q "network_swarm_public"; then
-        log_warn "Network já existe"
+    for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
+        apt-get remove -y $pkg 2>/dev/null || true
+    done
+
+    # 1. Configura a chave GPG do Docker
+    log_info "Configurando repositório Docker..."
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes
+    chmod a+r /etc/apt/keyrings/docker.gpg
+
+    # 2. Define variáveis de OS e Versão
+    . /etc/os-release
+    if [[ "$ID" == "ubuntu" ]]; then
+        REPO_URL="https://download.docker.com/linux/ubuntu"
+        VERSION_STRING="$DOCKER_UBUNTU_VER"
+    elif [[ "$ID" == "debian" ]]; then
+        REPO_URL="https://download.docker.com/linux/debian"
+        VERSION_STRING="${DOCKER_FALLBACK_VER}-1~debian.${VERSION_ID}~${VERSION_CODENAME}"
     else
-        docker network create --driver=overlay --attachable network_swarm_public
-        log_info "Network network_swarm_public criada"
+        log_error "SO não suportado. Use Debian ou Ubuntu."
     fi
-}
 
-setup_firewall() {
-    log_step "CONFIGURANDO FIREWALL UFW"
-    
-    # Desabilitar temporariamente para evitar problemas
-    ufw --force disable
-    
-    # Configurar regras
-    ufw default deny incoming
-    ufw default allow outgoing
-    
-    # Portas essenciais
-    ufw allow 22/tcp comment 'SSH'
-    ufw allow 80/tcp comment 'HTTP'
-    ufw allow 443/tcp comment 'HTTPS'
-    
-    # Portas Docker Swarm
-    ufw allow 2377/tcp comment 'Docker Swarm'
-    ufw allow 7946/tcp comment 'Docker Network'
-    ufw allow 7946/udp comment 'Docker Network'
-    ufw allow 4789/udp comment 'Docker Overlay'
-    
-    # Habilitar
-    ufw --force enable
-    
-    log_info "Firewall configurado"
+    # 3. Adiciona o repositório Docker
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL \
+      $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    apt-get update -qq
+
+    # 4. Tenta instalar a versão exata, com fallback para latest
+    DOCKER_PACKAGES="docker-ce=$VERSION_STRING docker-ce-cli=$VERSION_STRING containerd.io docker-buildx-plugin docker-compose-plugin"
+
+    if ! apt-get install -y $DOCKER_PACKAGES; then
+        log_warn "Falha ao instalar versão exata ($VERSION_STRING). Instalando a última versão estável (latest)..."
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    fi
+
+    log_info "Docker instalado com sucesso: $(docker --version)"
 }
 
 #==============================================================================
-# Instalação Traefik (Proxy Reverso + SSL)
+# 4. Criação de Arquivos (Compose, .env)
 #==============================================================================
 
-setup_traefik() {
-    log_step "INSTALANDO TRAEFIK v2.10 + LET'S ENCRYPT"
-    
-    mkdir -p /opt/traefik/letsencrypt
-    
-    # Criar arquivo acme.json com permissões corretas
-    touch /opt/traefik/letsencrypt/acme.json
-    chmod 600 /opt/traefik/letsencrypt/acme.json
-    
-    cat > /opt/traefik/docker-compose.yml <<EOF
-version: '3.8'
+prepare_files() {
+    clear
+    log_step "ETAPA 3/3: CONFIGURANDO STACK (Arquivos e Variáveis)"
+
+    mkdir -p $INSTALL_DIR/traefik
+
+    # 4.1. Arquivo ACME (SSL)
+    log_info "Criando arquivo acme.json e ajustando permissões..."
+    touch $INSTALL_DIR/traefik/acme.json
+    chmod 600 $INSTALL_DIR/traefik/acme.json
+
+    # 4.2. Arquivo .env (Secrets - reescrito com os dados mais atuais/persistidos)
+    log_info "Criando/Atualizando arquivo .env..."
+    cat > $INSTALL_DIR/.env <<EOF
+#======================================================
+# VARIAVEIS DE AMBIENTE (GERADAS EM: $(date))
+# Tracking Highend Master Installer V1.0
+#======================================================
+
+# DADOS DE DOMÍNIO E SSL
+BASE_DOMAIN=${BASE_DOMAIN}
+DOMAIN_TRAEFIK=${DOMAIN_TRAEFIK}
+DOMAIN_PORTAINER=${DOMAIN_PORTAINER}
+DOMAIN_N8N=${DOMAIN_N8N}
+DOMAIN_N8N_WEBHOOK=${DOMAIN_N8N_WEBHOOK}
+DOMAIN_PMA=${DOMAIN_PMA}
+EMAIL_SSL=${EMAIL_SSL_VAL}
+
+# SEGREDOS E SENHAS (Persistidas/Reutilizadas para estabilidade)
+POSTGRES_PASSWORD_N8N=${POSTGRES_PASSWORD_N8N_VAL}
+N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY_VAL}
+MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD_VAL}
+MYSQL_USER_PASSWORD=${MYSQL_USER_PASSWORD_VAL}
+REDIS_PASSWORD=${REDIS_PASSWORD_VAL}
+
+# TRAEFIK BASIC AUTH (admin:senha_hash)
+TRAEFIK_DASH_PASS_RAW=${TRAEFIK_DASH_PASS_RAW}
+TRAEFIK_BASIC_AUTH=${TRAEFIK_BASIC_AUTH_VAL}
+EOF
+    log_info "Arquivo .env com variáveis atualizadas."
+
+    # 4.3. Docker Compose (Com Queue Mode Separado e FIXES FINAIS)
+    log_info "Gerando arquivo docker-compose.yml..."
+    cat > $INSTALL_DIR/docker-compose.yml <<'EOF'
+
+# Âncora de configurações do N8N para compartilhar entre editor, webhook e worker
+x-n8n-shared: &n8n-shared
+  image: n8nio/n8n:stable # Versão Stable para Produção (V1.0)
+  restart: unless-stopped
+  depends_on:
+    n8n_postgres:
+      condition: service_healthy
+    redis_cache:
+      condition: service_started
+  environment:
+    # Configurações de Banco de Dados PostgreSQL (Dedicado ao N8N)
+    - 'DB_TYPE=postgresdb'
+    - 'DB_POSTGRESDB_HOST=n8n_postgres'
+    - 'DB_POSTGRESDB_PORT=5432'
+    - 'DB_POSTGRESDB_DATABASE=n8n'
+    - 'DB_POSTGRESDB_USER=n8n_user'
+    - 'DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD_N8N}'
+    # Configurações de URL e Queue Mode
+    - 'WEBHOOK_URL=https://${DOMAIN_N8N_WEBHOOK}'
+    - 'N8N_EDITOR_BASE_URL=https://${DOMAIN_N8N}'
+    - 'EXECUTIONS_MODE=queue'
+    - 'QUEUE_BULL_REDIS_HOST=redis_cache'
+    - 'QUEUE_BULL_REDIS_PORT=6379'
+    - 'QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}'
+    # Configurações de Estabilidade e Segurança
+    - 'DB_CONNECTION_MAX_RETRIES=50' # Aumenta a tolerância na inicialização do DB
+    - 'N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true' # Força permissões corretas (resolve warning)
+    - 'N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}' # Chave crucial para credenciais criptografadas
+    - 'N8N_ENABLE_CLUSTER_MODE=true' # Habilita o modo cluster/queue
+    - 'N8N_PROXY_HOPS=1'             # Configuração para Traefik
+    # Outras configurações
+    - 'GENERIC_TIMEZONE=America/Sao_Paulo'
+    - 'NODE_FUNCTION_ALLOW_EXTERNAL=*'
+    - 'N8N_AUTOSAVE_INTERVAL=60'
+    - 'N8N_PERSONALIZATION_DISABLED=true'
+    - 'N8N_SKIP_CREDENTIAL_TEST=false'
+  networks:
+    - traefik-net
+  extra_hosts:
+    - 'host.docker.internal:host-gateway'
 
 services:
+  # REVERSE PROXY E SSL (Traefik)
   traefik:
-    image: traefik:${TRAEFIK_VERSION}
-    command:
-      # API
-      - "--api.dashboard=true"
-      - "--api.insecure=false"
-      
-      # Entrypoints
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      
-      # Docker Provider
-      - "--providers.docker=true"
-      - "--providers.docker.swarmMode=true"
-      - "--providers.docker.exposedByDefault=false"
-      - "--providers.docker.network=network_swarm_public"
-      - "--providers.docker.watch=true"
-      
-      # Let's Encrypt
-      - "--certificatesresolvers.letsencryptresolver.acme.email=${EMAIL_SSL}"
-      - "--certificatesresolvers.letsencryptresolver.acme.storage=/letsencrypt/acme.json"
-      - "--certificatesresolvers.letsencryptresolver.acme.httpchallenge=true"
-      - "--certificatesresolvers.letsencryptresolver.acme.httpchallenge.entrypoint=web"
-      
-      # Logs
-      - "--log.level=INFO"
-      - "--accesslog=false"
-      
+    image: 'traefik:latest'
+    container_name: 'traefik'
+    restart: unless-stopped
     ports:
-      - target: 80
-        published: 80
-        mode: host
-      - target: 443
-        published: 443
-        mode: host
-        
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /opt/traefik/letsencrypt:/letsencrypt
-      
-    networks:
-      - network_swarm_public
-      
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-        window: 120s
-
-networks:
-  network_swarm_public:
-    external: true
-EOF
-
-    cd /opt/traefik
-    docker stack deploy -c docker-compose.yml traefik
-    
-    log_info "Traefik implantado"
-    wait_for_service "traefik_traefik" 30
-}
-
-#==============================================================================
-# Instalação Portainer (Gerenciamento Docker)
-#==============================================================================
-
-setup_portainer() {
-    log_step "INSTALANDO PORTAINER"
-    
-    mkdir -p /opt/portainer
-    
-    cat > /opt/portainer/docker-compose.yml <<EOF
-version: '3.8'
-
-services:
-  agent:
-    image: portainer/agent:${PORTAINER_VERSION}
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker/volumes:/var/lib/docker/volumes
-    networks:
-      - portainer-agent
-    deploy:
-      mode: global
-      placement:
-        constraints:
-          - node.platform.os == linux
-
-  portainer:
-    image: portainer/portainer-ce:${PORTAINER_VERSION}
-    command: -H tcp://tasks.agent:9001 --tlsskipverify
-    volumes:
-      - portainer-data:/data
-    networks:
-      - portainer-agent
-      - network_swarm_public
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.portainer.rule=Host(\`${DOMAIN_PORTAINER}\`)"
-        - "traefik.http.routers.portainer.entrypoints=websecure"
-        - "traefik.http.routers.portainer.tls=true"
-        - "traefik.http.routers.portainer.tls.certresolver=letsencryptresolver"
-        - "traefik.http.services.portainer.loadbalancer.server.port=9000"
-
-networks:
-  portainer-agent:
-    driver: overlay
-  network_swarm_public:
-    external: true
-
-volumes:
-  portainer-data:
-    driver: local
-EOF
-
-    cd /opt/portainer
-    docker stack deploy -c docker-compose.yml portainer
-    
-    log_info "Portainer implantado: https://${DOMAIN_PORTAINER}"
-    wait_for_service "portainer_portainer" 30
-}
-
-#==============================================================================
-# Instalação PostgreSQL
-#==============================================================================
-
-setup_postgres() {
-    log_step "INSTALANDO POSTGRESQL 15"
-    
-    mkdir -p /opt/postgres
-    docker volume create postgres_data
-    
-    cat > /opt/postgres/docker-compose.yml <<EOF
-version: '3.8'
-
-services:
-  postgres:
-    image: pgvector/pgvector:pg${POSTGRES_VERSION}
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: postgres
-      TZ: America/Sao_Paulo
-      PGDATA: /var/lib/postgresql/data/pgdata
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - network_swarm_public
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      restart_policy:
-        condition: on-failure
-
-volumes:
-  postgres_data:
-    external: true
-
-networks:
-  network_swarm_public:
-    external: true
-EOF
-
-    cd /opt/postgres
-    docker stack deploy -c docker-compose.yml postgres
-    
-    log_info "PostgreSQL implantado"
-    
-    # Aguardar PostgreSQL iniciar
-    echo -n "Aguardando PostgreSQL "
-    sleep 10
-    for i in {1..20}; do
-        echo -n "."
-        sleep 2
-    done
-    echo ""
-    
-    # Criar database para N8N
-    log_info "Criando database ${N8N_DB_NAME}..."
-    
-    MAX_TRIES=15
-    for i in $(seq 1 $MAX_TRIES); do
-        CONTAINER_ID=$(docker ps -q -f name=postgres_postgres 2>/dev/null | head -n1)
-        if [ -n "$CONTAINER_ID" ]; then
-            if docker exec "$CONTAINER_ID" psql -U postgres -c "CREATE DATABASE ${N8N_DB_NAME};" 2>/dev/null; then
-                log_info "Database ${N8N_DB_NAME} criado com sucesso"
-                break
-            fi
-        fi
-        
-        if [ $i -eq $MAX_TRIES ]; then
-            log_warn "Database não criado automaticamente. Será criado pelo N8N na primeira execução."
-        fi
-        sleep 3
-    done
-}
-
-#==============================================================================
-# Instalação MySQL
-#==============================================================================
-
-setup_mysql() {
-    log_step "INSTALANDO MYSQL 8.0 (PERCONA)"
-    
-    mkdir -p /opt/mysql
-    docker volume create mysql_data
-    
-    cat > /opt/mysql/docker-compose.yml <<EOF
-version: '3.8'
-
-services:
-  mysql:
-    image: percona/percona-server:${MYSQL_VERSION}
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      TZ: America/Sao_Paulo
-    volumes:
-      - mysql_data:/var/lib/mysql
-    networks:
-      - network_swarm_public
+      - '80:80'
+      - '443:443'
     command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
-      - --default-authentication-plugin=mysql_native_password
-      - --max-allowed-packet=512M
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      restart_policy:
-        condition: on-failure
-
-volumes:
-  mysql_data:
-    external: true
-
-networks:
-  network_swarm_public:
-    external: true
-EOF
-
-    cd /opt/mysql
-    docker stack deploy -c docker-compose.yml mysql
-    
-    log_info "MySQL implantado"
-    wait_for_service "mysql_mysql" 30
-}
-
-#==============================================================================
-# Instalação phpMyAdmin
-#==============================================================================
-
-setup_phpmyadmin() {
-    log_step "INSTALANDO PHPMYADMIN"
-    
-    mkdir -p /opt/phpmyadmin
-    
-    cat > /opt/phpmyadmin/docker-compose.yml <<EOF
-version: '3.8'
-
-services:
-  phpmyadmin:
-    image: phpmyadmin:${PHPMYADMIN_VERSION}
-    environment:
-      PMA_HOST: mysql
-      PMA_PORT: 3306
-      UPLOAD_LIMIT: 512M
-      MEMORY_LIMIT: 512M
-      MAX_EXECUTION_TIME: 600
-      TZ: America/Sao_Paulo
+      - --log.level=INFO
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=traefik-net
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --api.dashboard=true
+      - --api.insecure=false
+      # Configuração Let's Encrypt (ACME)
+      - --certificatesresolvers.letsencryptresolver.acme.email=${EMAIL_SSL}
+      - --certificatesresolvers.letsencryptresolver.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencryptresolver.acme.httpchallenge=true
+      - --certificatesresolvers.letsencryptresolver.acme.httpchallenge.entrypoint=web
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - './traefik/acme.json:/letsencrypt/acme.json' # Volume para persistência dos certificados
     networks:
-      - network_swarm_public
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.phpmyadmin.rule=Host(\`${DOMAIN_PHPMYADMIN}\`)"
-        - "traefik.http.routers.phpmyadmin.entrypoints=websecure"
-        - "traefik.http.routers.phpmyadmin.tls=true"
-        - "traefik.http.routers.phpmyadmin.tls.certresolver=letsencryptresolver"
-        - "traefik.http.services.phpmyadmin.loadbalancer.server.port=80"
+      - traefik-net
+    labels:
+      # Roteamento do Dashboard do Traefik (protegido por Basic Auth)
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.traefik-dashboard.rule=Host(`${DOMAIN_TRAEFIK}`)'
+      - 'traefik.http.routers.traefik-dashboard.service=api@internal'
+      - 'traefik.http.routers.traefik-dashboard.entrypoints=websecure'
+      - 'traefik.http.routers.traefik-dashboard.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.routers.traefik-dashboard.middlewares=auth'
+      - 'traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_BASIC_AUTH}'
 
-networks:
-  network_swarm_public:
-    external: true
-EOF
+  # POSTGRES DEDICADO AO N8N (DB ÚNICO)
+  n8n_postgres:
+    image: postgres:16
+    container_name: 'n8n_postgres'
+    restart: unless-stopped
+    environment:
+      - 'POSTGRES_DB=n8n'
+      - 'POSTGRES_USER=n8n_user'
+      - 'POSTGRES_PASSWORD=${POSTGRES_PASSWORD_N8N}'
+    ports:
+      - "5432:5432" # Porta exposta para acesso externo/ferramentas de DB
+    volumes:
+      - 'postgres_data:/var/lib/postgresql/data'
+    networks:
+      - traefik-net
+    healthcheck: # Garante que o N8N só inicie após o DB estar pronto
+      test: ["CMD-SHELL", "pg_isready -U n8n_user -d n8n || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-    cd /opt/phpmyadmin
-    docker stack deploy -c docker-compose.yml phpmyadmin
-    
-    log_info "phpMyAdmin implantado: https://${DOMAIN_PHPMYADMIN}"
-    wait_for_service "phpmyadmin_phpmyadmin" 30
-}
-
-#==============================================================================
-# Instalação N8N (Automação)
-#==============================================================================
-
-setup_n8n() {
-    log_step "INSTALANDO N8N COM FILA E WORKERS"
-    
-    mkdir -p /opt/n8n
-    docker volume create n8n_data
-    
-    cat > /opt/n8n/docker-compose.yml <<EOF
-version: '3.8'
-
-services:
-  redis:
+  # REDIS (Cache e Queue para o Cluster N8N)
+  redis_cache:
     image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy allkeys-lru
+    container_name: 'redis_cache'
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - 'redis_data:/data'
     networks:
-      - network_swarm_public
+      - traefik-net
     deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
+      resources:
+        limits:
+          memory: 128M # Limite de memória para o Redis
 
-  n8n_admin:
-    image: n8nio/n8n:${N8N_VERSION}
+  # N8N EDITOR (Web Interface e Inicialização)
+  n8n_editor:
+    <<: *n8n-shared
+    container_name: 'n8n_editor'
     command: start
-    environment:
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_DATABASE=${N8N_DB_NAME}
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_USER=postgres
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - N8N_HOST=${DOMAIN_N8N}
-      - N8N_EDITOR_BASE_URL=https://${DOMAIN_N8N}/
-      - N8N_PROTOCOL=https
-      - NODE_ENV=production
-      - WEBHOOK_URL=https://${DOMAIN_WEBHOOK}/
-      - EXECUTIONS_MODE=queue
-      - QUEUE_BULL_REDIS_HOST=redis
-      - QUEUE_BULL_REDIS_PORT=6379
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - QUEUE_BULL_REDIS_DB=1
-      - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
-      - EXECUTIONS_DATA_PRUNE=true
-      - EXECUTIONS_DATA_MAX_AGE=336
-      - N8N_DIAGNOSTICS_ENABLED=false
-      - GENERIC_TIMEZONE=America/Sao_Paulo
-      - TZ=America/Sao_Paulo
     volumes:
       - n8n_data:/home/node/.n8n
-    networks:
-      - network_swarm_public
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.n8n_admin.rule=Host(\`${DOMAIN_N8N}\`)"
-        - "traefik.http.routers.n8n_admin.entrypoints=websecure"
-        - "traefik.http.routers.n8n_admin.priority=2"
-        - "traefik.http.routers.n8n_admin.tls=true"
-        - "traefik.http.routers.n8n_admin.tls.certresolver=letsencryptresolver"
-        - "traefik.http.routers.n8n_admin.service=n8n_admin"
-        - "traefik.http.services.n8n_admin.loadbalancer.server.port=5678"
+    ports:
+      - "5678:5678" # REQUISITO: Porta exposta no host para comunicação API direta/depuração.
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.services.n8n-editor-service.loadbalancer.server.port=5678'
+      - 'traefik.http.routers.n8n.rule=Host(`${DOMAIN_N8N}`)'
+      - 'traefik.http.routers.n8n.service=n8n-editor-service'
+      - 'traefik.http.routers.n8n.entrypoints=websecure'
+      - 'traefik.http.routers.n8n.tls.certresolver=letsencryptresolver'
 
+  # N8N WEBHOOK (Recebimento de Webhooks Externos)
   n8n_webhook:
-    image: n8nio/n8n:${N8N_VERSION}
-    command: webhook
-    environment:
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_DATABASE=${N8N_DB_NAME}
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_USER=postgres
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - N8N_HOST=${DOMAIN_N8N}
-      - N8N_EDITOR_BASE_URL=https://${DOMAIN_N8N}/
-      - N8N_PROTOCOL=https
-      - NODE_ENV=production
-      - WEBHOOK_URL=https://${DOMAIN_WEBHOOK}/
-      - EXECUTIONS_MODE=queue
-      - QUEUE_BULL_REDIS_HOST=redis
-      - QUEUE_BULL_REDIS_PORT=6379
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - QUEUE_BULL_REDIS_DB=1
-      - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
-      - GENERIC_TIMEZONE=America/Sao_Paulo
-      - TZ=America/Sao_Paulo
-    networks:
-      - network_swarm_public
-    deploy:
-      mode: replicated
-      replicas: 2
-      placement:
-        constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.n8n_webhook.rule=Host(\`${DOMAIN_WEBHOOK}\`)"
-        - "traefik.http.routers.n8n_webhook.entrypoints=websecure"
-        - "traefik.http.routers.n8n_webhook.priority=1"
-        - "traefik.http.routers.n8n_webhook.tls=true"
-        - "traefik.http.routers.n8n_webhook.tls.certresolver=letsencryptresolver"
-        - "traefik.http.routers.n8n_webhook.service=n8n_webhook"
-        - "traefik.http.services.n8n_webhook.loadbalancer.server.port=5678"
+    <<: *n8n-shared
+    container_name: 'n8n_webhook'
+    command: webhook # Inicia o serviço em modo Webhook
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.services.n8n-webhook-service.loadbalancer.server.port=5678'
+      - 'traefik.http.routers.n8n-webhook.rule=Host(`${DOMAIN_N8N_WEBHOOK}`)'
+      - 'traefik.http.routers.n8n-webhook.service=n8n-webhook-service'
+      - 'traefik.http.routers.n8n-webhook.entrypoints=websecure'
+      - 'traefik.http.routers.n8n-webhook.tls.certresolver=letsencryptresolver'
 
+  # N8N WORKER (Execução Assíncrona de Fluxos)
   n8n_worker:
-    image: n8nio/n8n:${N8N_VERSION}
-    command: worker --concurrency=10
-    environment:
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_DATABASE=${N8N_DB_NAME}
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_USER=postgres
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - EXECUTIONS_MODE=queue
-      - QUEUE_BULL_REDIS_HOST=redis
-      - QUEUE_BULL_REDIS_PORT=6379
-      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      - QUEUE_BULL_REDIS_DB=1
-      - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
-      - GENERIC_TIMEZONE=America/Sao_Paulo
-      - TZ=America/Sao_Paulo
-    networks:
-      - network_swarm_public
-    deploy:
-      mode: replicated
-      replicas: 3
-      placement:
-        constraints:
-          - node.role == manager
+    <<: *n8n-shared
+    container_name: 'n8n_worker'
+    command: worker --concurrency=10 # Inicia o serviço em modo Worker
 
-volumes:
-  n8n_data:
-    external: true
+  # PORTAINER (Web UI para gerenciamento do Docker)
+  portainer:
+    container_name: portainer
+    image: portainer/portainer-ce:2.20.2
+    restart: always
+    environment:
+      - "PORTAINER_PUBLIC_URL=https://${DOMAIN_PORTAINER}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - traefik-net
+    labels:
+      # Roteamento do Portainer (Acesso via Traefik)
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.portainer.rule=Host(`${DOMAIN_PORTAINER}`)'
+      - 'traefik.http.services.portainer.loadbalancer.server.port=9000'
+      - 'traefik.http.routers.portainer.entrypoints=websecure'
+      - 'traefik.http.routers.portainer.tls.certresolver=letsencryptresolver'
+
+  # MYSQL (Banco de Dados de Informações - Uso Geral)
+  mysql_db:
+    image: mysql:8.0
+    container_name: 'mysql_db'
+    restart: unless-stopped
+    environment:
+      - 'MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}'
+      - 'MYSQL_DATABASE=infoproduct'
+      - 'MYSQL_USER=n8n_mysql_user'
+      - 'MYSQL_PASSWORD=${MYSQL_USER_PASSWORD}'
+    volumes:
+      - 'mysql_data:/var/lib/mysql'
+    ports:
+      - "3306:3306" # Porta padrão 3306 exposta no host
+    networks:
+      - traefik-net
+
+  # PHPMYADMIN (Interface para MySQL)
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: 'phpmyadmin'
+    restart: unless-stopped
+    depends_on:
+      - mysql_db
+    environment:
+      - 'PMA_HOST=mysql_db' # Conecta ao serviço mysql_db
+      - 'MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}'
+      - 'PMA_PORT=3306'
+      - 'PMA_ARBITRARY=0'
+    networks:
+      - traefik-net
+    labels:
+      # Roteamento do phpMyAdmin (Acesso via Traefik)
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.pma.rule=Host(`${DOMAIN_PMA}`)'
+      - 'traefik.http.services.pma.loadbalancer.server.port=80'
+      - 'traefik.http.routers.pma.entrypoints=websecure'
+      - 'traefik.http.routers.pma.tls.certresolver=letsencryptresolver'
 
 networks:
-  network_swarm_public:
-    external: true
+  traefik-net:
+    driver: bridge
+    name: traefik-net
+
+# Definição dos Volumes Persistentes
+volumes:
+  portainer_data:
+    name: portainer_data
+  redis_data:
+  postgres_data:
+  n8n_data:
+  mysql_data:
+EOF
+    log_info "Arquivo docker-compose.yml (Cluster N8N V1.0) criado."
+}
+
+#==============================================================================
+# 5. Execução e Relatório Final
+#==============================================================================
+
+deploy_stack() {
+    clear
+    log_step "ETAPA 3/3: INICIANDO DEPLOY COM DOCKER COMPOSE"
+
+    cd $INSTALL_DIR
+
+    log_info "Baixando imagens necessárias (Pull)..."
+    docker compose pull
+
+    log_info "Subindo a stack (Traefik, DBs, N8N Cluster)..."
+    docker compose up -d --remove-orphans
+
+    log_info "Stack inicializada com sucesso! (N8N Queue Mode V1.0)"
+}
+
+generate_report() {
+    # Coleta o IP atual do servidor
+    IP=$(hostname -I | awk '{print $1}')
+    REPORT_FILE="/root/CREDENCIAIS_V1.0.txt"
+
+    # Salva o relatório de credenciais no arquivo
+    cat > "$REPORT_FILE" <<EOF
+=====================================================
+      INSTALAÇÃO FINALIZADA - V1.0 (QUEUE MODE)
+=====================================================
+
+DATA:          $(date)
+IP SERVIDOR:   ${IP}
+DIRETÓRIO DA STACK: ${INSTALL_DIR}
+
+ACESSOS WEB (SSL via Let's Encrypt - Traefik):
+-----------------------------------------
+Traefik Dash:  https://${DOMAIN_TRAEFIK}
+   User: admin
+   Pass: ${TRAEFIK_DASH_PASS_RAW}
+
+Portainer:     https://${DOMAIN_PORTAINER} (Versão 2.20.2)
+N8N Editor:    https://${DOMAIN_N8N}
+N8N Webhook:   https://${DOMAIN_N8N_WEBHOOK}
+phpMyAdmin:    https://${DOMAIN_PMA}
+
+ACESSOS DIRETOS (SEM SSL, via IP e Porta):
+-----------------------------------------
+N8N Editor:    http://${IP}:5678 (Acesso API ou Interface)
+PostgreSQL:    http://${IP}:5432
+MySQL:         http://${IP}:3306
+
+CREDENCIAIS DE BANCO DE DADOS:
+-----------------------------------------
+POSTGRES (n8n_postgres:5432) - DEDICADO AO N8N:
+   User: n8n_user
+   Pass: ${POSTGRES_PASSWORD_N8N_VAL}
+   DB:   n8n
+
+MYSQL (mysql_db:3306) - DADOS GERAIS:
+   Host Port: 3306
+   Root Pass: ${MYSQL_ROOT_PASSWORD_VAL}
+   User:      n8n_mysql_user
+   Pass:      ${MYSQL_USER_PASSWORD_VAL}
+   DB Padrão: infoproduct
+
+N8N (Cluster/Queue Mode Secrets):
+-----------------------------------------
+REDIS Password: ${REDIS_PASSWORD_VAL}
+Encryption Key: ${N8N_ENCRYPTION_KEY_VAL}
+
+Comandos Rápidos (Executar em ${INSTALL_DIR}):
+- Para parar:    docker compose stop
+- Para subir:    docker compose up -d
+- Para remover:  docker compose down
+=====================================================
 EOF
 
-    cd /opt/n8n
-    docker stack deploy -c docker-compose.yml n8n
-    
-    log_info "N8N implantado: https://${DOMAIN_N8N}"
-    log_info "N8N Webhook: https://${DOMAIN_WEBHOOK}"
+    # Imprime a versão colorida no terminal
+    clear
+    log_step "DEPLOY CONCLUÍDO! (V1.0 - Lançamento Final)"
+
+    echo -e "${MAGENTA}${BOLD}================================================================${NC}"
+    echo -e "${MAGENTA}${BOLD}             RESUMO DE INSTALAÇÃO - STACK V1.0                  ${NC}"
+    echo -e "${MAGENTA}${BOLD}================================================================${NC}"
+    echo -e "Data/Hora:     ${GREEN}$(date)${NC}"
+    echo -e "IP Servidor:   ${GREEN}${IP}${NC}"
+    echo -e "Diretório Base:  ${GREEN}${INSTALL_DIR}${NC}"
+
+    echo -e "\n${RED}${BOLD}>> AVISO IMPORTANTE (Traefik/SSL - Rate Limit)${NC}"
+    echo -e "----------------------------------------------------------------"
+    echo -e "Se houver erro de certificado (código 429), o Let's Encrypt pode ter"
+    echo -e "aplicado um limite de taxa. Solução: Espere 7 dias ou renomeie"
+    echo -e "o arquivo ${YELLOW}acme.json${NC} em ${YELLOW}${INSTALL_DIR}/traefik/${NC} e tente novos subdomínios."
+
+    echo -e "\n${MAGENTA}${BOLD}>> ACESSOS WEB (SSL via Traefik/Let's Encrypt)${NC}"
+    echo -e "----------------------------------------------------------------"
+    echo -e "Traefik Dash:  ${CYAN}https://${DOMAIN_TRAEFIK}${NC}"
+    echo -e "   ${YELLOW}User: admin | Pass: ${TRAEFIK_DASH_PASS_RAW}${NC}"
+    echo -e "Portainer:     ${CYAN}https://${DOMAIN_PORTAINER}${NC}"
+    echo -e "N8N Editor:    ${CYAN}https://${DOMAIN_N8N}${NC}"
+    echo -e "N8N Webhook:   ${CYAN}https://${DOMAIN_N8N_WEBHOOK}${NC}"
+    echo -e "phpMyAdmin:    ${CYAN}https://${DOMAIN_PMA}${NC}"
+
+    echo -e "\n${MAGENTA}${BOLD}>> CREDENCIAIS DE BANCO DE DADOS E N8N SECRETS${NC}"
+    echo -e "----------------------------------------------------------------"
+    echo -e "POSTGRES (n8n_postgres) N8N DB:   ${YELLOW}User: n8n_user | Pass: ${POSTGRES_PASSWORD_N8N_VAL}${NC}"
+    echo -e "MYSQL (mysql_db) Dados Gerais:    ${YELLOW}Root Pass: ${MYSQL_ROOT_PASSWORD_VAL}${NC}"
+    echo -e "N8N Encrypt Key (CRUCIAL!):  ${YELLOW}${N8N_ENCRYPTION_KEY_VAL}\n${NC}"
+
+    echo -e "\n${MAGENTA}${BOLD}================================================================${NC}"
+    echo -e "${GREEN}As credenciais foram salvas em ${REPORT_FILE}${NC}"
 }
 
 #==============================================================================
-# Geração do Resumo Final
-#==============================================================================
-
-generate_summary() {
-    log_step "GERANDO RESUMO DA INSTALAÇÃO"
-    
-    SERVER_IP=$(hostname -I | awk '{print $1}')
-    DOCKER_VERSION=$(docker version --format '{{.Server.Version}}')
-    
-    cat > /root/THE-installation-summary.txt <<EOF
-================================================================================
-                    THE - RESUMO DA INSTALAÇÃO
-================================================================================
-
-Data e Hora: $(date '+%d/%m/%Y %H:%M:%S')
-Servidor IP: ${SERVER_IP}
-Sistema: Debian $(lsb_release -rs)
-Docker: ${DOCKER_VERSION}
-Traefik: ${TRAEFIK_VERSION}
-
-================================================================================
-                              ACESSOS
-================================================================================
-
-Portainer:    https://${DOMAIN_PORTAINER}
-phpMyAdmin:   https://${DOMAIN_PHPMYADMIN}
-N8N Admin:    https://${DOMAIN_N8N}
-N8N Webhook:  https://${DOMAIN_WEBHOOK}
-
-IMPORTANTE: Os certificados SSL podem levar 2-5 minutos para serem gerados
-na primeira vez. Se encontrar erro de certificado, aguarde alguns minutos.
-
-================================================================================
-                           CREDENCIAIS
-================================================================================
-
-━━━ POSTGRESQL ━━━
-Host:         postgres (interno) ou ${SERVER_IP}:5432 (externo)
-Database:     ${N8N_DB_NAME} (N8N)
-Usuário:      postgres
-Senha:        ${POSTGRES_PASSWORD}
-
-━━━ MYSQL ━━━
-Host:         mysql (interno) ou ${SERVER_IP}:3306 (externo)
-Usuário:      root
-Senha:        ${MYSQL_ROOT_PASSWORD}
-
-━━━ N8N ━━━
-Database:     ${N8N_DB_NAME}
-DB User:      postgres
-DB Password:  ${POSTGRES_PASSWORD}
-Encryption:   ${N8N_ENCRYPTION_KEY}
-
-━━━ REDIS ━━━
-Host:         redis
-Password:     ${REDIS_PASSWORD}
-
-================================================================================
-                        CONFIGURAÇÃO DNS
-================================================================================
-
-Aponte os seguintes registros A para o IP: ${SERVER_IP}
-
-${DOMAIN_PORTAINER}      → ${SERVER_IP}
-${DOMAIN_PHPMYADMIN}     → ${SERVER_IP}
-${DOMAIN_N8N}            → ${SERVER_IP}
-${DOMAIN_WEBHOOK}        → ${SERVER_IP}
-
-Para verificar DNS:
-  dig ${DOMAIN_N8N} +short
-
-================================================================================
-                        COMANDOS ÚTEIS
-================================================================================
-
-━━━ GERENCIAMENTO DE STACKS ━━━
-Ver stacks:              docker stack ls
-Ver serviços:            docker service ls
-Ver containers:          docker ps
-
-━━━ LOGS ━━━
-Logs Traefik:            docker service logs traefik_traefik -f
-Logs Portainer:          docker service logs portainer_portainer -f
-Logs N8N Admin:          docker service logs n8n_n8n_admin -f
-Logs N8N Worker:         docker service logs n8n_n8n_worker -f
-Logs PostgreSQL:         docker service logs postgres_postgres -f
-Logs MySQL:              docker service logs mysql_mysql -f
-
-━━━ GESTÃO DE SERVIÇOS ━━━
-Reiniciar serviço:       docker service update --force <nome_servico>
-Escalar workers N8N:     docker service scale n8n_n8n_worker=5
-Remover stack:           docker stack rm <nome_stack>
-
-━━━ VERIFICAR CERTIFICADOS SSL ━━━
-Ver certificados:        cat /opt/traefik/letsencrypt/acme.json
-Forçar renovação:        docker service update --force traefik_traefik
-
-━━━ BACKUP E MANUTENÇÃO ━━━
-Backup PostgreSQL:       docker exec \$(docker ps -qf name=postgres) \\
-                         pg_dump -U postgres ${N8N_DB_NAME} > backup.sql
-Backup MySQL:            docker exec \$(docker ps -qf name=mysql) \\
-                         mysqldump -u root -p${MYSQL_ROOT_PASSWORD} --all-databases > backup.sql
-
-================================================================================
-                     DIRETÓRIOS DE CONFIGURAÇÃO
-================================================================================
-
-Traefik:      /opt/traefik/
-Portainer:    /opt/portainer/
-PostgreSQL:   /opt/postgres/
-MySQL:        /opt/mysql/
-phpMyAdmin:   /opt/phpmyadmin/
-N8N:          /opt/n8n/
-
-Certificados SSL: /opt/traefik/letsencrypt/acme.json
-
-================================================================================
-                     ARQUITETURA N8N
-================================================================================
-
-O N8N está configurado com alta disponibilidade:
-
-- 1x N8N Admin     - Interface de gerenciamento
-- 2x N8N Webhook   - Processamento de webhooks (load balanced)
-- 3x N8N Worker    - Processamento de filas em background
-- 1x Redis         - Gerenciamento de filas
-
-Para escalar workers conforme demanda:
-  docker service scale n8n_n8n_worker=5
-
-================================================================================
-                     TROUBLESHOOTING
-================================================================================
-
-━━━ CERTIFICADOS SSL NÃO GERADOS ━━━
-1. Verifique se DNS está apontando: dig ${DOMAIN_N8N} +short
-2. Verifique se porta 80 está acessível externamente
-3. Veja logs do Traefik: docker service logs traefik_traefik -f
-4. Aguarde 5-10 minutos e tente novamente
-
-━━━ SERVIÇO NÃO INICIANDO ━━━
-1. Ver logs: docker service logs <nome_servico> -f
-2. Ver tarefas: docker service ps <nome_servico> --no-trunc
-3. Reiniciar: docker service update --force <nome_servico>
-
-━━━ N8N NÃO CONECTA NO POSTGRES ━━━
-1. Verificar se database existe:
-   docker exec \$(docker ps -qf name=postgres) psql -U postgres -l
-2. Se não existir, criar:
-   docker exec \$(docker ps -qf name=postgres) \\
-   psql -U postgres -c "CREATE DATABASE ${N8N_DB_NAME};"
-
-━━━ PERFORMANCE ━━━
-- Verificar uso de recursos: htop
-- Ver logs de performance: docker stats
-- Ajustar workers N8N conforme carga
-
-================================================================================
-                     PRÓXIMOS PASSOS
-================================================================================
-
-1. ✓ Configurar DNS apontando para ${SERVER_IP}
-2. ✓ Aguardar 5-10 minutos para certificados SSL
-3. → Acessar Portainer e criar senha de admin
-4. → Acessar N8N e criar primeiro usuário
-5. → Acessar phpMyAdmin (user: root, senha acima)
-
-================================================================================
-                     SEGURANÇA
-================================================================================
-
-⚠️  IMPORTANTE - Ações de segurança recomendadas:
-
-1. Altere as senhas padrão imediatamente
-2. Configure backup automático dos databases
-3. Monitore os logs regularmente
-4. Mantenha o Docker atualizado: apt-get upgrade docker-ce
-5. Configure alertas de monitoramento
-
-================================================================================
-                     SUPORTE
-================================================================================
-
-Email SSL: ${EMAIL_SSL}
-Este arquivo: /root/THE-installation-summary.txt
-
-Para suporte adicional, consulte a documentação:
-- Traefik: https://doc.traefik.io/traefik/
-- N8N: https://docs.n8n.io/
-- Docker Swarm: https://docs.docker.com/engine/swarm/
-
-================================================================================
-                     FIM DO RESUMO
-================================================================================
-EOF
-
-    # Exibir resumo
-    cat /root/THE-installation-summary.txt
-    
-    log_info "Resumo completo salvo em: /root/THE-installation-summary.txt"
-}
-
-#==============================================================================
-# Verificações Finais
-#==============================================================================
-
-final_checks() {
-    log_step "VERIFICAÇÕES FINAIS"
-    
-    echo ""
-    echo -e "${CYAN}Status dos Serviços:${NC}"
-    echo ""
-    docker service ls
-    
-    echo ""
-    echo -e "${CYAN}Verificando DNS:${NC}"
-    echo ""
-    
-    for domain in "$DOMAIN_PORTAINER" "$DOMAIN_PHPMYADMIN" "$DOMAIN_N8N" "$DOMAIN_WEBHOOK"; do
-        IP=$(dig +short "$domain" | head -n1)
-        if [ -n "$IP" ]; then
-            log_info "$domain → $IP ✓"
-        else
-            log_warn "$domain → Não configurado ainda"
-        fi
-    done
-    
-    echo ""
-    log_info "Monitorar geração de certificados:"
-    echo -e "  ${BLUE}docker service logs traefik_traefik -f${NC}"
-}
-
-#==============================================================================
-# Execução Principal
+# MAIN (Orquestração do Fluxo de Instalação)
 #==============================================================================
 
 main() {
-    echo ""
-    check_root
-    check_os
-    
-    # Coleta de informações
-    collect_domains
-    generate_credentials
-    
-    # Confirmação
-    echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}Confirma a instalação com as configurações acima?${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -n "Digite 's' para continuar ou 'n' para cancelar: "
-    read -r CONFIRM
-    
-    if [ "$CONFIRM" != "s" ] && [ "$CONFIRM" != "S" ]; then
-        log_error "Instalação cancelada pelo usuário"
-    fi
-    
-    # Instalação do sistema base
-    setup_swap
-    install_dependencies
+    main_preamble
+
+    if [ "$(id -u)" -ne 0 ]; then log_error "Execute como ROOT: sudo ./install.sh"; fi
+
+    read # PAUSA 1: Inicia a coleta de domínios.
+
+    # 1. Instalação de Base (limpa a tela e começa)
+    install_base_deps
+
+    # 2. Verifica portas e coleta info (INTERATIVO)
+    check_ports
+    collect_info
+
+    echo -e "\n${YELLOW}${BOLD}>> ETAPA 1 CONCLUÍDA (Pré-requisitos e Configuração de Domínios). PRÓXIMA: Instalação do Docker.${NC}"
+    auto_continue # PAUSA 2: Automática (3s)
+
+    # 3. Instala Docker
     install_docker
-    setup_docker_swarm
-    create_networks
-    setup_firewall
-    
-    # Instalação dos serviços (ordem importa!)
-    setup_traefik       # 1º - Proxy reverso + SSL
-    sleep 20            # Aguardar Traefik estabilizar
-    
-    setup_postgres      # 2º - Database para N8N
-    sleep 15            # Aguardar Postgres estabilizar
-    
-    setup_mysql         # 3º - Database geral
-    sleep 15            # Aguardar MySQL estabilizar
-    
-    setup_portainer     # 4º - Gerenciamento (depende de Traefik)
-    sleep 10
-    
-    setup_phpmyadmin    # 5º - Gerenciamento MySQL (depende de MySQL)
-    sleep 10
-    
-    setup_n8n           # 6º - N8N por último (depende de tudo)
-    sleep 15
-    
-    # Finalização
-    generate_summary
-    final_checks
-    
-    echo ""
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}        INSTALAÇÃO CONCLUÍDA COM SUCESSO!${NC}"
-    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "${CYAN}➜ Configure os DNS apontando para o servidor${NC}"
-    echo -e "${CYAN}➜ Aguarde 5-10 minutos para os certificados SSL${NC}"
-    echo -e "${CYAN}➜ Resumo completo: cat /root/THE-installation-summary.txt${NC}"
-    echo ""
-    echo -e "${YELLOW}Monitorar certificados em tempo real:${NC}"
-    echo -e "  ${BLUE}docker service logs traefik_traefik -f | grep -i acme${NC}"
-    echo ""
+
+    echo -e "\n${YELLOW}${BOLD}>> ETAPA 2 CONCLUÍDA (Docker). PRÓXIMA: Configuração da Stack e Deploy.${NC}"
+    auto_continue # PAUSA 3: Automática (3s)
+
+    # 4. Prepara arquivos e faz o deploy
+    prepare_files
+    deploy_stack
+    generate_report
 }
 
-# Executar instalação
 main
