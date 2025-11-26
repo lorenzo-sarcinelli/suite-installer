@@ -307,7 +307,7 @@ EOF
 
 # Âncora de configurações do N8N para compartilhar entre editor, webhook e worker
 x-n8n-shared: &n8n-shared
-  image: n8nio/n8n:stable # Versão Stable para Produção (V1.0)
+  image: n8nio/n8n:latest # Versão Latest para Produção (V1.0)
   restart: unless-stopped
   depends_on:
     n8n_postgres:
