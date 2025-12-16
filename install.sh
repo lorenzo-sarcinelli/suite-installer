@@ -1,362 +1,347 @@
 #!/usr/bin/env bash
-
-#==============================================================================
-# INSTALLER V1.0 - Tracking Highend Production Stack (Compose + .env)
-# Status: Versão de Lançamento Final com Fixes de Estabilidade e Automação.
-# Objetivo: Deploy rápido de um Cluster N8N (Queue Mode) com Traefik (SSL) e DBs.
-#==============================================================================
-
-# Interrompe o script imediatamente se qualquer comando falhar.
 set -e
 
-# Cores e Formatação (Para melhor visualização no terminal)
+#==============================================================================
+# INSTALLER V5.5 - "Typebot Endpoint Fix"
+# Features: V5.4 + Correção do S3_ENDPOINT no Typebot.
+#==============================================================================
+
+# --- CORES & FORMATACAO ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
+BLUE='\033[0;34m'
+WHITE='\033[1;37m'
 NC='\033[0m'
 BOLD='\033[1m'
-BLUE='\033[0;34m'
 
-# Variáveis de Versão e Diretório
-DOCKER_UBUNTU_VER="5:27.5.1-1~ubuntu.24.04~noble" # Versão específica para Ubuntu 24.04
-DOCKER_FALLBACK_VER="5:27.5.1"                     # Versão de fallback para Debian
-INSTALL_DIR="/opt/stack"                           # Diretório base para os arquivos de configuração
+INSTALL_DIR="/opt/stack"
 
-#==============================================================================
-# Funções Auxiliares e Display
-#==============================================================================
+# --- VARIAVEIS GLOBAIS (Defaults) ---
+ENABLE_TRAEFIK=true
+ENABLE_PORTAINER=false
+ENABLE_MINIO=false
+ENABLE_N8N=false
+ENABLE_TYPEBOT=false
+ENABLE_EVOLUTION=false
+ENABLE_WORDPRESS=false
+ENABLE_RABBIT=false
+ENABLE_PGADMIN=false
+ENABLE_PMA=false
 
-# Funções de Log customizadas
-log_info() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-log_step() {
-    echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}▶ $1${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-}
+# Flags de Dependencia
+NEED_POSTGRES=false
+NEED_MYSQL=false
+NEED_REDIS=false
 
-# FUNÇÃO: Pausa Automática (Auto-Continue)
-auto_continue() {
-    local seconds=3
-    echo -e "\n${YELLOW}${BOLD}>> PAUSA AUTOMÁTICA: Continuando em $seconds segundos... (Pressione Ctrl+C para cancelar)${NC}"
-    sleep $seconds
-    clear # Limpa a tela para a próxima etapa
-}
+# Flags de Controle
+PREVIOUS_INSTALL=false
 
-# FUNÇÃO: Banner e Resumo Inicial
-main_preamble() {
+# --- FUNÇÕES AUXILIARES ---
+
+print_header() {
     clear
     echo -e "${MAGENTA}${BOLD}"
     cat << "EOF"
 ████████╗██╗  ██╗███████╗    ███████╗████████╗ █████╗  ██████╗██╗  ██╗
 ╚══██╔══╝██║  ██║██╔════╝    ██╔════╝╚══██╔══╝██╔══██╗██╔════╝██║ ██╔╝
-   ██║   ███████║█████╗      ███████╗   ██║   ███████║██║     █████╔╝
-   ██║   ██║  ██║██╔══╝      ╚════██║   ██║   ██╔══██║██║     ██╔═██╗
+   ██║   ███████║█████╗      ███████╗   ██║   ███████║██║     █████╔╝ 
+   ██║   ██║  ██║██╔══╝      ╚════██║   ██║   ██╔══██║██║     ██╔═██╗ 
    ██║   ██║  ██║███████╗    ███████║   ██║   ██║  ██║╚██████╗██║  ██╗
    ╚═╝   ╚═╝  ╚═╝╚══════╝    ╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝
 
-Tracking Highend - Master Installer (V1.0)
+Tracking Highend - Installer V2.0
 EOF
     echo -e "${NC}"
-
-    echo -e "* ${RED}AVISO:${NC} antes de executar, libere os subdominios para instalação"
-    echo -e "* ${YELLOW}SubDominios:${NC} n8n, traefik, portainer, webhook, pma"
-
-    echo -e "\n${YELLOW}${BOLD}SETUP RESUMO:${NC}"
-    echo -e "--------------------------------------------------------"
-    echo -e "* ${GREEN}Orquestrador:${NC} Docker Compose"
-    echo -e "* ${GREEN}Reverse Proxy:${NC} Traefik (v3) com Let's Encrypt (SSL/HTTPS)"
-    echo -e "* ${GREEN}Serviços Principais:${NC} N8N (Editor, Webhook, Worker) em modo Cluster/Queue"
-    echo -e "* ${GREEN}Bancos de Dados:${NC} PostgreSQL (N8N) e MySQL (Dados, porta 3306) + phpMyAdmin"
-    echo -e "* ${GREEN}Gerenciador:${NC} Portainer (Web UI)"
-    echo -e "--------------------------------------------------------"
-    echo -e "${NC}"
-    echo -e "${RED}${BOLD}PRÉ-REQUISITO:${NC} Execute como ROOT e configure o DNS antes do deploy."
-    echo -e "\n${YELLOW}${BOLD}Pressione ENTER para iniciar a configuração dos domínios...${NC}"
 }
 
-# FUNÇÃO: Verifica se as portas 80, 443 e 3306 estão livres.
-check_ports() {
-    log_step "VERIFICANDO PORTAS (80, 443, 3306 e 5678)"
+log_info() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_input() { echo -e "${CYAN}[INPUT]${NC} $1"; }
 
-    # Verifica portas 80 (HTTP) e 443 (HTTPS)
-    if lsof -i :80 > /dev/null 2>&1 || lsof -i :443 > /dev/null 2>&1; then
-        log_warn "Portas 80 ou 443 em uso. Tentando parar serviços conflitantes (apache/nginx)..."
-        systemctl stop apache2 2>/dev/null || true
-        systemctl disable apache2 2>/dev/null || true
-        systemctl stop nginx 2>/dev/null || true
-        systemctl disable nginx 2>/dev/null || true
+# --- ETAPA 0: CARREGAMENTO DE ESTADO ---
+
+load_state() {
+    if [ -f "$INSTALL_DIR/.env" ]; then
+        log_info "Instalação anterior detectada em $INSTALL_DIR"
+        PREVIOUS_INSTALL=true
+        set -a
+        source "$INSTALL_DIR/.env"
+        set +a
+        ENABLE_MINIO=${ENABLE_MINIO:-false}
+        log_info "Configurações carregadas: ${WHITE}${BASE_DOMAIN}${NC}"
+    else
+        log_info "Iniciando instalação limpa."
     fi
-
-    # Verifica porta 3306 (MySQL)
-    if lsof -i :3306 > /dev/null 2>&1; then
-        log_warn "A porta 3306 (MySQL/MariaDB) está em uso no host. O MySQL do Docker pode ter conflitos."
-    fi
-
-    # Verifica porta 5678 (N8N Editor - Exposta por solicitação)
-    if lsof -i :5678 > /dev/null 2>&1; then
-        log_warn "A porta 5678 (N8N Editor) está em uso no host. O Editor do Docker não será acessível diretamente por esta porta."
-    fi
-
-    log_info "Verificação de portas concluída."
+    sleep 1
 }
 
-# FUNÇÃO: Atualiza o sistema e instala dependências básicas.
+ask_cleanup() {
+    print_header
+    echo -e "${CYAN}--- GESTÃO DE AMBIENTE ---${NC}"
+    if [ "$PREVIOUS_INSTALL" = true ]; then
+        echo -e "${YELLOW}ATENÇÃO: Instalação existente.${NC}"
+        echo "1) ATUALIZAR (Recomendado - Aplica novas configs)"
+        echo "2) LIMPEZA TOTAL (Apaga TUDO)"
+        echo "3) Sair"
+        read -p "Opção [1-3]: " -r OPT
+        case $OPT in
+            1) log_info "Atualizando..." ;;
+            2)
+                read -p "Digite 'APAGAR' para confirmar: " -r CONFIRM
+                if [ "$CONFIRM" == "APAGAR" ]; then
+                    log_warn "Destruindo ambiente..."
+                    cd $INSTALL_DIR 2>/dev/null || true
+                    docker compose down 2>/dev/null || true
+                    rm -rf $INSTALL_DIR
+                    PREVIOUS_INSTALL=false
+                    unset BASE_DOMAIN EMAIL_SSL TRAEFIK_PASS PG_PASS_N8N
+                    log_info "Ambiente limpo."
+                else
+                    exit 0
+                fi
+                ;;
+            *) exit 0 ;;
+        esac
+    else
+        mkdir -p $INSTALL_DIR
+    fi
+}
+
 install_base_deps() {
-    clear
-    log_step "ETAPA 1/3: ATUALIZANDO SISTEMA BASE E INSTALANDO PRÉ-REQUISITOS"
-
-    log_info "Executando apt update e upgrade..."
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
-
-    log_info "Instalando dependências essenciais (curl, gnupg, htpasswd)..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg lsb-release apache2-utils
-
-    log_info "Sistema base pronto."
+    if ! command -v docker >/dev/null; then
+        echo -e "\n${CYAN}--- DEPENDÊNCIAS ---${NC}"
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg lsb-release apache2-utils openssl git
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh > /dev/null 2>&1
+        rm get-docker.sh
+    fi
 }
 
-#==============================================================================
-# 2. Coleta de Dados e Geração/Leitura de Segredos (Persistência)
-#==============================================================================
+# --- ETAPA 1: SELEÇÃO ---
+
+toggle_service() {
+    local SERVICE_NAME=$1
+    local CURRENT_VAL=$2
+    local VAR_NAME=$3
+    STATUS="${RED}[DESATIVADO]${NC}"
+    if [ "$CURRENT_VAL" = true ]; then STATUS="${GREEN}[ATIVADO]${NC}"; fi
+    read -p "$(echo -e "${WHITE}$SERVICE_NAME${NC} está $STATUS. Mudar? [S/N]: ")" -r opt
+    if [[ $opt =~ ^[Ss]$ ]]; then
+        if [ "$CURRENT_VAL" = true ]; then eval "$VAR_NAME=false"; else eval "$VAR_NAME=true"; fi
+    fi
+}
+
+selection_menu() {
+    print_header
+    echo -e "${CYAN}--- MENU ---${NC}"
+    toggle_service "Portainer" "$ENABLE_PORTAINER" "ENABLE_PORTAINER"
+    toggle_service "MinIO (S3 Server)" "$ENABLE_MINIO" "ENABLE_MINIO"
+    toggle_service "N8N Cluster" "$ENABLE_N8N" "ENABLE_N8N"
+    toggle_service "Typebot" "$ENABLE_TYPEBOT" "ENABLE_TYPEBOT"
+    toggle_service "Evolution API" "$ENABLE_EVOLUTION" "ENABLE_EVOLUTION"
+    toggle_service "WordPress" "$ENABLE_WORDPRESS" "ENABLE_WORDPRESS"
+    echo -e "\n${YELLOW}--- TOOLS ---${NC}"
+    toggle_service "RabbitMQ" "$ENABLE_RABBIT" "ENABLE_RABBIT"
+    toggle_service "pgAdmin" "$ENABLE_PGADMIN" "ENABLE_PGADMIN"
+    toggle_service "phpMyAdmin" "$ENABLE_PMA" "ENABLE_PMA"
+
+    NEED_POSTGRES=false; NEED_MYSQL=false; NEED_REDIS=false
+    if [ "$ENABLE_N8N" = true ] || [ "$ENABLE_TYPEBOT" = true ] || [ "$ENABLE_EVOLUTION" = true ] || [ "$ENABLE_PGADMIN" = true ]; then NEED_POSTGRES=true; fi
+    if [ "$ENABLE_N8N" = true ] || [ "$ENABLE_TYPEBOT" = true ] || [ "$ENABLE_EVOLUTION" = true ]; then NEED_REDIS=true; fi
+    if [ "$ENABLE_WORDPRESS" = true ] || [ "$ENABLE_PMA" = true ]; then NEED_MYSQL=true; fi
+}
+
+# --- ETAPA 2: CONFIGURAÇÃO ---
 
 collect_info() {
-    log_step "CONFIGURAÇÃO DE DOMÍNIOS E SEGREDOS"
+    print_header
+    echo -e "${CYAN}--- CONFIGURAÇÃO ---${NC}"
+    if [ -n "$BASE_DOMAIN" ]; then
+        read -p "Manter domínio base '${BASE_DOMAIN}'? [S/n]: " -r keep_dom
+        if [[ $keep_dom =~ ^[Nn]$ ]]; then unset BASE_DOMAIN; fi
+    fi
+    if [ -z "$BASE_DOMAIN" ]; then
+        while true; do
+            echo -n "Novo Domínio Base (ex: empresa.com): "
+            read -r BASE_DOMAIN
+            if [[ "$BASE_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then break; fi; echo -e "${RED}Inválido.${NC}"
+        done
+    fi
 
-    # 2.1. Coleta de Domínio Base (Interativa)
-    while true; do
-        echo -n "Domínio principal (ex: empresa.com.br): "
-        read -r BASE_DOMAIN
-        if [[ "$BASE_DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-            break
-        else
-            echo -e "${RED}Formato inválido. Ex: nome.com.br${NC}"
+    DOMAIN_TRAEFIK="traefik.${BASE_DOMAIN}"
+    DOMAIN_PORTAINER="portainer.${BASE_DOMAIN}"
+    DOMAIN_MINIO_CONSOLE="minio.${BASE_DOMAIN}"
+    DOMAIN_MINIO_API="s3.${BASE_DOMAIN}"
+    DOMAIN_N8N="n8n.${BASE_DOMAIN}"
+    DOMAIN_N8N_WEBHOOK="webhook.${BASE_DOMAIN}"
+    DOMAIN_EVOLUTION="evolution.${BASE_DOMAIN}"
+    DOMAIN_TYPEBOT="typebot.${BASE_DOMAIN}"
+    DOMAIN_TYPEBOT_VIEWER="bot.${BASE_DOMAIN}"
+    DOMAIN_RABBIT="rabbit.${BASE_DOMAIN}"
+    DOMAIN_PGADMIN="pgadmin.${BASE_DOMAIN}"
+    DOMAIN_WORDPRESS="wordpress.${BASE_DOMAIN}"
+    DOMAIN_PMA="pma.${BASE_DOMAIN}"
+
+    if [ -n "$EMAIL_SSL" ]; then
+        read -p "Manter Email SSL '${EMAIL_SSL}'? [S/n]: " -r keep_email
+        if [[ $keep_email =~ ^[Nn]$ ]]; then unset EMAIL_SSL; fi
+    fi
+    if [ -z "$EMAIL_SSL" ]; then
+        read -p "Email SSL: " EMAIL_SSL_VAL
+        EMAIL_SSL=${EMAIL_SSL_VAL:-admin@${BASE_DOMAIN}}
+    fi
+
+    if [ "$ENABLE_TYPEBOT" = true ] || [ "$ENABLE_WORDPRESS" = true ] || [ "$ENABLE_N8N" = true ]; then
+        echo -e "\n${YELLOW}SMTP Config${NC}"
+        if [ -n "$SMTP_HOST" ]; then
+            read -p "Manter SMTP existente? [S/n]: " -r keep_smtp
+            if [[ $keep_smtp =~ ^[Nn]$ ]]; then unset SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM; fi
         fi
-    done
-
-    # 2.2. Coleta de Subdomínios (Interativa com Padrão)
-    echo -e "\n${CYAN}Definição de Subdomínios (Enter para manter o padrão):${NC}"
-
-    read -p "Traefik Dashboard [traefik.$BASE_DOMAIN]: " SUB_TRAEFIK
-    SUB_TRAEFIK=${SUB_TRAEFIK:-traefik}
-    DOMAIN_TRAEFIK="${SUB_TRAEFIK}.${BASE_DOMAIN}"
-
-    read -p "Portainer       [portainer.$BASE_DOMAIN]: " SUB_PORTAINER
-    SUB_PORTAINER=${SUB_PORTAINER:-portainer}
-    DOMAIN_PORTAINER="${SUB_PORTAINER}.${BASE_DOMAIN}"
-
-    read -p "N8N Editor      [n8n.$BASE_DOMAIN]: " SUB_N8N
-    SUB_N8N=${SUB_N8N:-n8n}
-    DOMAIN_N8N="${SUB_N8N}.${BASE_DOMAIN}"
-
-    read -p "N8N Webhook     [webhook.$BASE_DOMAIN]: " SUB_N8N_WEBHOOK
-    SUB_N8N_WEBHOOK=${SUB_N8N_WEBHOOK:-webhook}
-    DOMAIN_N8N_WEBHOOK="${SUB_N8N_WEBHOOK}.${BASE_DOMAIN}"
-
-    read -p "phpMyAdmin      [pma.$BASE_DOMAIN]: " SUB_PMA
-    SUB_PMA=${SUB_PMA:-pma}
-    DOMAIN_PMA="${SUB_PMA}.${BASE_DOMAIN}"
-
-    read -p "Email para SSL  [admin@$BASE_DOMAIN]: " EMAIL_SSL_VAL
-    EMAIL_SSL_VAL=${EMAIL_SSL_VAL:-admin@${BASE_DOMAIN}}
-
-
-    # 2.3. Lógica de Persistência de Segredos
-    ENV_FILE="$INSTALL_DIR/.env"
-
-    if [ -f "$ENV_FILE" ]; then
-        log_warn "Arquivo .env existente. Reutilizando chaves de criptografia e senhas DB/Redis para ${BOLD}evitar perda de dados no N8N${NC}."
-
-        # Carrega variáveis existentes para reutilização
-        source "$ENV_FILE"
-
-        POSTGRES_PASSWORD_N8N_VAL="${POSTGRES_PASSWORD_N8N}"
-        MYSQL_ROOT_PASSWORD_VAL="${MYSQL_ROOT_PASSWORD}"
-        MYSQL_USER_PASSWORD_VAL="${MYSQL_USER_PASSWORD}"
-        N8N_ENCRYPTION_KEY_VAL="${N8N_ENCRYPTION_KEY}"
-        REDIS_PASSWORD_VAL="${REDIS_PASSWORD}"
-        TRAEFIK_DASH_PASS_RAW="${TRAEFIK_DASH_PASS_RAW}"
-        TRAEFIK_BASIC_AUTH_VAL="${TRAEFIK_BASIC_AUTH}"
-
-    else
-        log_info "Gerando novos segredos criptográficos (primeira execução)..."
-        # Geração de Senhas e Chaves
-        POSTGRES_PASSWORD_N8N_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
-        MYSQL_ROOT_PASSWORD_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
-        MYSQL_USER_PASSWORD_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
-        N8N_ENCRYPTION_KEY_VAL=$(openssl rand -base64 24)
-        REDIS_PASSWORD_VAL=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
-
-        # Geração de Senha para Traefik Dashboard (Basic Auth)
-        TRAEFIK_DASH_PASS_RAW=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-12)
-
-        if command -v htpasswd >/dev/null; then
-            # Cria hash htpasswd (substituindo $ por $$ para o docker compose ler corretamente)
-            TRAEFIK_BASIC_AUTH_VAL=$(htpasswd -nb admin "$TRAEFIK_DASH_PASS_RAW" | sed 's/\$/\$\$/g')
-        else
-            log_warn "htpasswd não encontrado. Usando hash padrão."
-            TRAEFIK_BASIC_AUTH_VAL="admin:\$\$apr1\$\$5Uqb5YDD\$\$QuT0/wmWT/xporevFvdwm0"
+        if [ -z "$SMTP_HOST" ]; then
+            read -p "Possui SMTP? [s/n]: " -r has_smtp
+            if [[ $has_smtp =~ ^[Ss]$ ]]; then
+                read -p "Host: " SMTP_HOST; read -p "Port: " SMTP_PORT; read -p "User: " SMTP_USER
+                read -p "Pass: " SMTP_PASS; read -p "From: " SMTP_FROM
+            else
+                SMTP_HOST="smtp.fake.com"; SMTP_PORT="587"; SMTP_USER="user"; SMTP_PASS="pass"; SMTP_FROM="noreply@$BASE_DOMAIN"
+            fi
         fi
     fi
+
+    log_info "Gerando credenciais..."
+    TRAEFIK_PASS=${TRAEFIK_PASS:-$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-12)}
+    TRAEFIK_HASH_RAW=$(htpasswd -nbB admin "$TRAEFIK_PASS")
+    TRAEFIK_AUTH=$(echo "$TRAEFIK_HASH_RAW" | sed 's/\$/\$\$/g' | tr -d '\n')
+    PG_PASS_N8N=${PG_PASS_N8N:-$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)}
+    PG_PASS_EVO=${PG_PASS_EVO:-$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)}
+    PG_PASS_TYPEBOT=${PG_PASS_TYPEBOT:-$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)}
+    MYSQL_ROOT_PASS=${MYSQL_ROOT_PASS:-$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)}
+    WP_DB_PASS=${WP_DB_PASS:-$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)}
+    REDIS_PASS=${REDIS_PASSWORD:-$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)}
+    N8N_KEY=${N8N_ENCRYPTION_KEY:-$(openssl rand -base64 24)}
+    EVO_API_KEY=${EVOLUTION_API_KEY:-$(openssl rand -hex 32)}
+    TYPEBOT_ENC_KEY=${TYPEBOT_ENC_KEY:-$(openssl rand -base64 24)}
+    RABBIT_PASS=${RABBIT_PASS:-$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-12)}
+    PGADMIN_PASS=${PGADMIN_PASS:-$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-12)}
+    MINIO_ROOT_USER=${MINIO_ROOT_USER:-"admin"}
+    MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)}
 }
 
-#==============================================================================
-# 3. Instalação Docker (Versão Específica)
-#==============================================================================
+# --- ETAPA 3: GERAÇÃO DE ARQUIVOS ---
 
-install_docker() {
-    log_step "ETAPA 2/3: INSTALANDO DOCKER (Versão Fixa: ${DOCKER_FALLBACK_VER})"
-
-    # Remove qualquer instalação anterior (swarm, pacotes)
-    if docker info 2>/dev/null | grep -q "Swarm: active"; then
-        log_warn "Removendo Swarm antigo..."
-        docker swarm leave --force 2>/dev/null || true
-    fi
-
-    for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-        apt-get remove -y $pkg 2>/dev/null || true
-    done
-
-    # 1. Configura a chave GPG do Docker
-    log_info "Configurando repositório Docker..."
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes
-    chmod a+r /etc/apt/keyrings/docker.gpg
-
-    # 2. Define variáveis de OS e Versão
-    . /etc/os-release
-    if [[ "$ID" == "ubuntu" ]]; then
-        REPO_URL="https://download.docker.com/linux/ubuntu"
-        VERSION_STRING="$DOCKER_UBUNTU_VER"
-    elif [[ "$ID" == "debian" ]]; then
-        REPO_URL="https://download.docker.com/linux/debian"
-        VERSION_STRING="${DOCKER_FALLBACK_VER}-1~debian.${VERSION_ID}~${VERSION_CODENAME}"
-    else
-        log_error "SO não suportado. Use Debian ou Ubuntu."
-    fi
-
-    # 3. Adiciona o repositório Docker
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] $REPO_URL \
-      $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-    apt-get update -qq
-
-    # 4. Tenta instalar a versão exata, com fallback para latest
-    DOCKER_PACKAGES="docker-ce=$VERSION_STRING docker-ce-cli=$VERSION_STRING containerd.io docker-buildx-plugin docker-compose-plugin"
-
-    if ! apt-get install -y $DOCKER_PACKAGES; then
-        log_warn "Falha ao instalar versão exata ($VERSION_STRING). Instalando a última versão estável (latest)..."
-        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    fi
-
-    log_info "Docker instalado com sucesso: $(docker --version)"
-}
-
-#==============================================================================
-# 4. Criação de Arquivos (Compose, .env)
-#==============================================================================
-
-prepare_files() {
-    clear
-    log_step "ETAPA 3/3: CONFIGURANDO STACK (Arquivos e Variáveis)"
-
+generate_files() {
+    print_header
+    echo -e "${CYAN}--- GERAÇÃO DOCKER COMPOSE ---${NC}"
     mkdir -p $INSTALL_DIR/traefik
+    touch $INSTALL_DIR/traefik/acme.json && chmod 600 $INSTALL_DIR/traefik/acme.json
 
-    # 4.1. Arquivo ACME (SSL)
-    log_info "Criando arquivo acme.json e ajustando permissões..."
-    touch $INSTALL_DIR/traefik/acme.json
-    chmod 600 $INSTALL_DIR/traefik/acme.json
-
-    # 4.2. Arquivo .env (Secrets - reescrito com os dados mais atuais/persistidos)
-    log_info "Criando/Atualizando arquivo .env..."
     cat > $INSTALL_DIR/.env <<EOF
-#======================================================
-# VARIAVEIS DE AMBIENTE (GERADAS EM: $(date))
-# Tracking Highend Master Installer V1.0
-#======================================================
-
-# DADOS DE DOMÍNIO E SSL
 BASE_DOMAIN=${BASE_DOMAIN}
+EMAIL_SSL=${EMAIL_SSL}
+ENABLE_TRAEFIK=${ENABLE_TRAEFIK}
+ENABLE_PORTAINER=${ENABLE_PORTAINER}
+ENABLE_MINIO=${ENABLE_MINIO}
+ENABLE_N8N=${ENABLE_N8N}
+ENABLE_TYPEBOT=${ENABLE_TYPEBOT}
+ENABLE_EVOLUTION=${ENABLE_EVOLUTION}
+ENABLE_WORDPRESS=${ENABLE_WORDPRESS}
+ENABLE_RABBIT=${ENABLE_RABBIT}
+ENABLE_PGADMIN=${ENABLE_PGADMIN}
+ENABLE_PMA=${ENABLE_PMA}
+TRAEFIK_PASS=${TRAEFIK_PASS}
+TRAEFIK_AUTH=${TRAEFIK_AUTH}
+PG_PASS_N8N=${PG_PASS_N8N}
+PG_PASS_EVO=${PG_PASS_EVO}
+PG_PASS_TYPEBOT=${PG_PASS_TYPEBOT}
+MYSQL_ROOT_PASS=${MYSQL_ROOT_PASS}
+WP_DB_PASS=${WP_DB_PASS}
+REDIS_PASSWORD=${REDIS_PASS}
+N8N_ENCRYPTION_KEY=${N8N_KEY}
+EVOLUTION_API_KEY=${EVO_API_KEY}
+TYPEBOT_ENC_KEY=${TYPEBOT_ENC_KEY}
+RABBIT_PASS=${RABBIT_PASS}
+PGADMIN_PASS=${PGADMIN_PASS}
+MINIO_ROOT_USER=${MINIO_ROOT_USER}
+MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+SMTP_HOST=${SMTP_HOST}
+SMTP_PORT=${SMTP_PORT}
+SMTP_USER=${SMTP_USER}
+SMTP_PASS=${SMTP_PASS}
+SMTP_FROM=${SMTP_FROM}
+WP_SMTP_HOST=${SMTP_HOST}
+WP_SMTP_PORT=${SMTP_PORT}
+WP_SMTP_USER=${SMTP_USER}
+WP_SMTP_PASS=${SMTP_PASS}
+WP_SMTP_FROM=${SMTP_FROM}
+N8N_SMTP_HOST=${SMTP_HOST}
+N8N_SMTP_PORT=${SMTP_PORT}
+N8N_SMTP_USER=${SMTP_USER}
+N8N_SMTP_PASS=${SMTP_PASS}
+N8N_SMTP_SENDER=${SMTP_FROM}
 DOMAIN_TRAEFIK=${DOMAIN_TRAEFIK}
 DOMAIN_PORTAINER=${DOMAIN_PORTAINER}
+DOMAIN_MINIO_CONSOLE=${DOMAIN_MINIO_CONSOLE}
+DOMAIN_MINIO_API=${DOMAIN_MINIO_API}
 DOMAIN_N8N=${DOMAIN_N8N}
 DOMAIN_N8N_WEBHOOK=${DOMAIN_N8N_WEBHOOK}
+DOMAIN_EVOLUTION=${DOMAIN_EVOLUTION}
+DOMAIN_TYPEBOT=${DOMAIN_TYPEBOT}
+DOMAIN_TYPEBOT_VIEWER=${DOMAIN_TYPEBOT_VIEWER}
+DOMAIN_RABBIT=${DOMAIN_RABBIT}
+DOMAIN_PGADMIN=${DOMAIN_PGADMIN}
+DOMAIN_WORDPRESS=${DOMAIN_WORDPRESS}
 DOMAIN_PMA=${DOMAIN_PMA}
-EMAIL_SSL=${EMAIL_SSL_VAL}
-
-# SEGREDOS E SENHAS (Persistidas/Reutilizadas para estabilidade)
-POSTGRES_PASSWORD_N8N=${POSTGRES_PASSWORD_N8N_VAL}
-N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY_VAL}
-MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD_VAL}
-MYSQL_USER_PASSWORD=${MYSQL_USER_PASSWORD_VAL}
-REDIS_PASSWORD=${REDIS_PASSWORD_VAL}
-
-# TRAEFIK BASIC AUTH (admin:senha_hash)
-TRAEFIK_DASH_PASS_RAW=${TRAEFIK_DASH_PASS_RAW}
-TRAEFIK_BASIC_AUTH=${TRAEFIK_BASIC_AUTH_VAL}
 EOF
-    log_info "Arquivo .env com variáveis atualizadas."
 
-    # 4.3. Docker Compose (Com Queue Mode Separado e FIXES FINAIS)
-    log_info "Gerando arquivo docker-compose.yml..."
-    cat > $INSTALL_DIR/docker-compose.yml <<'EOF'
-
-# Âncora de configurações do N8N para compartilhar entre editor, webhook e worker
+    (
+    cat <<EOF
 x-n8n-shared: &n8n-shared
-  image: n8nio/n8n:stable # Versão Stable para Produção (V1.0)
+  image: n8nio/n8n:2.0.0
   restart: unless-stopped
   depends_on:
-    n8n_postgres:
-      condition: service_healthy
-    redis_cache:
-      condition: service_started
+    n8n_postgres: { condition: service_healthy }
+    redis_cache: { condition: service_started }
   environment:
-    # Configurações de Banco de Dados PostgreSQL (Dedicado ao N8N)
-    - 'DB_TYPE=postgresdb'
-    - 'DB_POSTGRESDB_HOST=n8n_postgres'
-    - 'DB_POSTGRESDB_PORT=5432'
-    - 'DB_POSTGRESDB_DATABASE=n8n'
-    - 'DB_POSTGRESDB_USER=n8n_user'
-    - 'DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD_N8N}'
-    # Configurações de URL e Queue Mode
-    - 'WEBHOOK_URL=https://${DOMAIN_N8N_WEBHOOK}'
-    - 'N8N_EDITOR_BASE_URL=https://${DOMAIN_N8N}'
-    - 'EXECUTIONS_MODE=queue'
-    - 'QUEUE_BULL_REDIS_HOST=redis_cache'
-    - 'QUEUE_BULL_REDIS_PORT=6379'
-    - 'QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}'
-    # Configurações de Estabilidade e Segurança
-    - 'DB_CONNECTION_MAX_RETRIES=50' # Aumenta a tolerância na inicialização do DB
-    - 'N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true' # Força permissões corretas (resolve warning)
-    - 'N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}' # Chave crucial para credenciais criptografadas
-    - 'N8N_ENABLE_CLUSTER_MODE=true' # Habilita o modo cluster/queue
-    - 'N8N_PROXY_HOPS=1'             # Configuração para Traefik
-    # Outras configurações
-    - 'GENERIC_TIMEZONE=America/Sao_Paulo'
-    - 'NODE_FUNCTION_ALLOW_EXTERNAL=*'
-    - 'N8N_AUTOSAVE_INTERVAL=60'
-    - 'N8N_PERSONALIZATION_DISABLED=true'
-    - 'N8N_SKIP_CREDENTIAL_TEST=false'
-  networks:
-    - traefik-net
-  extra_hosts:
-    - 'host.docker.internal:host-gateway'
+    - DB_TYPE=postgresdb
+    - DB_POSTGRESDB_HOST=n8n_postgres
+    - DB_POSTGRESDB_PORT=5432
+    - DB_POSTGRESDB_DATABASE=n8n
+    - DB_POSTGRESDB_USER=n8n_user
+    - DB_POSTGRESDB_PASSWORD=\${PG_PASS_N8N}
+    - WEBHOOK_URL=https://\${DOMAIN_N8N_WEBHOOK}
+    - N8N_EDITOR_BASE_URL=https://\${DOMAIN_N8N}
+    - EXECUTIONS_MODE=queue
+    - N8N_PROXY_HOPS=1
+    - N8N_TRUST_PROXY=true
+    - QUEUE_BULL_REDIS_HOST=redis_cache
+    - QUEUE_BULL_REDIS_PORT=6379
+    - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}
+    - N8N_ENCRYPTION_KEY=\${N8N_ENCRYPTION_KEY}
+    - N8N_ENABLE_CLUSTER_MODE=true
+    - GENERIC_TIMEZONE=America/Sao_Paulo
+    - N8N_EMAIL_MODE=smtp
+    - N8N_SMTP_HOST=\${N8N_SMTP_HOST}
+    - N8N_SMTP_PORT=\${N8N_SMTP_PORT}
+    - N8N_SMTP_USER=\${N8N_SMTP_USER}
+    - N8N_SMTP_PASS=\${N8N_SMTP_PASS}
+    - N8N_SMTP_SSL=true
+    - N8N_SMTP_SENDER=\${N8N_SMTP_SENDER}
+  networks: [ traefik-net ]
+  extra_hosts: [ 'host.docker.internal:host-gateway' ]
 
 services:
-  # REVERSE PROXY E SSL (Traefik)
   traefik:
     image: 'traefik:latest'
     container_name: 'traefik'
     restart: unless-stopped
-    ports:
-      - '80:80'
-      - '443:443'
+    ports: [ '80:80', '443:443' ]
+    environment:
+      - DOCKER_CLIENT_API_VERSION=1.44
     command:
-      - --log.level=INFO
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=traefik-net
@@ -365,318 +350,493 @@ services:
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
       - --entrypoints.websecure.address=:443
       - --api.dashboard=true
-      - --api.insecure=false
-      # Configuração Let's Encrypt (ACME)
-      - --certificatesresolvers.letsencryptresolver.acme.email=${EMAIL_SSL}
+      - --certificatesresolvers.letsencryptresolver.acme.email=\${EMAIL_SSL}
       - --certificatesresolvers.letsencryptresolver.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.letsencryptresolver.acme.httpchallenge=true
       - --certificatesresolvers.letsencryptresolver.acme.httpchallenge.entrypoint=web
     volumes:
       - '/var/run/docker.sock:/var/run/docker.sock:ro'
-      - './traefik/acme.json:/letsencrypt/acme.json' # Volume para persistência dos certificados
-    networks:
-      - traefik-net
+      - './traefik/acme.json:/letsencrypt/acme.json'
+    networks: [ traefik-net ]
     labels:
-      # Roteamento do Dashboard do Traefik (protegido por Basic Auth)
       - 'traefik.enable=true'
-      - 'traefik.http.routers.traefik-dashboard.rule=Host(`${DOMAIN_TRAEFIK}`)'
-      - 'traefik.http.routers.traefik-dashboard.service=api@internal'
-      - 'traefik.http.routers.traefik-dashboard.entrypoints=websecure'
-      - 'traefik.http.routers.traefik-dashboard.tls.certresolver=letsencryptresolver'
-      - 'traefik.http.routers.traefik-dashboard.middlewares=auth'
-      - 'traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_BASIC_AUTH}'
+      - 'traefik.http.routers.traefik.rule=Host(\`\${DOMAIN_TRAEFIK}\`)'
+      - 'traefik.http.routers.traefik.service=api@internal'
+      - 'traefik.http.routers.traefik.middlewares=auth'
+      - 'traefik.http.middlewares.auth.basicauth.users=\${TRAEFIK_AUTH}' 
+      - 'traefik.http.routers.traefik.tls.certresolver=letsencryptresolver'
 
-  # POSTGRES DEDICADO AO N8N (DB ÚNICO)
+EOF
+
+    if [ "$NEED_POSTGRES" = true ]; then
+        cat <<EOF
   n8n_postgres:
     image: postgres:16
     container_name: 'n8n_postgres'
     restart: unless-stopped
     environment:
-      - 'POSTGRES_DB=n8n'
-      - 'POSTGRES_USER=n8n_user'
-      - 'POSTGRES_PASSWORD=${POSTGRES_PASSWORD_N8N}'
-    ports:
-      - "5432:5432" # Porta exposta para acesso externo/ferramentas de DB
-    volumes:
-      - 'postgres_data:/var/lib/postgresql/data'
-    networks:
-      - traefik-net
-    healthcheck: # Garante que o N8N só inicie após o DB estar pronto
+      - POSTGRES_DB=n8n
+      - POSTGRES_USER=n8n_user
+      - POSTGRES_PASSWORD=\${PG_PASS_N8N}
+    volumes: [ 'postgres_data:/var/lib/postgresql/data' ]
+    networks: [ traefik-net ]
+    healthcheck:
       test: ["CMD-SHELL", "pg_isready -U n8n_user -d n8n || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
 
-  # REDIS (Cache e Queue para o Cluster N8N)
+EOF
+    fi
+
+    if [ "$NEED_REDIS" = true ]; then
+        cat <<EOF
   redis_cache:
     image: redis:7-alpine
     container_name: 'redis_cache'
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD}
-    volumes:
-      - 'redis_data:/data'
-    networks:
-      - traefik-net
-    deploy:
-      resources:
-        limits:
-          memory: 128M # Limite de memória para o Redis
+    command: redis-server --requirepass \${REDIS_PASSWORD}
+    volumes: [ 'redis_data:/data' ]
+    networks: [ traefik-net ]
 
-  # N8N EDITOR (Web Interface e Inicialização)
-  n8n_editor:
-    <<: *n8n-shared
-    container_name: 'n8n_editor'
-    command: start
-    volumes:
-      - n8n_data:/home/node/.n8n
-    ports:
-      - "5678:5678" # REQUISITO: Porta exposta no host para comunicação API direta/depuração.
-    labels:
-      - 'traefik.enable=true'
-      - 'traefik.http.services.n8n-editor-service.loadbalancer.server.port=5678'
-      - 'traefik.http.routers.n8n.rule=Host(`${DOMAIN_N8N}`)'
-      - 'traefik.http.routers.n8n.service=n8n-editor-service'
-      - 'traefik.http.routers.n8n.entrypoints=websecure'
-      - 'traefik.http.routers.n8n.tls.certresolver=letsencryptresolver'
+EOF
+    fi
 
-  # N8N WEBHOOK (Recebimento de Webhooks Externos)
-  n8n_webhook:
-    <<: *n8n-shared
-    container_name: 'n8n_webhook'
-    command: webhook # Inicia o serviço em modo Webhook
-    labels:
-      - 'traefik.enable=true'
-      - 'traefik.http.services.n8n-webhook-service.loadbalancer.server.port=5678'
-      - 'traefik.http.routers.n8n-webhook.rule=Host(`${DOMAIN_N8N_WEBHOOK}`)'
-      - 'traefik.http.routers.n8n-webhook.service=n8n-webhook-service'
-      - 'traefik.http.routers.n8n-webhook.entrypoints=websecure'
-      - 'traefik.http.routers.n8n-webhook.tls.certresolver=letsencryptresolver'
-
-  # N8N WORKER (Execução Assíncrona de Fluxos)
-  n8n_worker:
-    <<: *n8n-shared
-    container_name: 'n8n_worker'
-    command: worker --concurrency=10 # Inicia o serviço em modo Worker
-
-  # PORTAINER (Web UI para gerenciamento do Docker)
-  portainer:
-    container_name: portainer
-    image: portainer/portainer-ce:2.20.2
-    restart: always
-    environment:
-      - "PORTAINER_PUBLIC_URL=https://${DOMAIN_PORTAINER}"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - portainer_data:/data
-    networks:
-      - traefik-net
-    labels:
-      # Roteamento do Portainer (Acesso via Traefik)
-      - 'traefik.enable=true'
-      - 'traefik.http.routers.portainer.rule=Host(`${DOMAIN_PORTAINER}`)'
-      - 'traefik.http.services.portainer.loadbalancer.server.port=9000'
-      - 'traefik.http.routers.portainer.entrypoints=websecure'
-      - 'traefik.http.routers.portainer.tls.certresolver=letsencryptresolver'
-
-  # MYSQL (Banco de Dados de Informações - Uso Geral)
+    if [ "$NEED_MYSQL" = true ]; then
+        cat <<EOF
   mysql_db:
     image: mysql:8.0
     container_name: 'mysql_db'
     restart: unless-stopped
     environment:
-      - 'MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}'
-      - 'MYSQL_DATABASE=infoproduct'
-      - 'MYSQL_USER=n8n_mysql_user'
-      - 'MYSQL_PASSWORD=${MYSQL_USER_PASSWORD}'
-    volumes:
-      - 'mysql_data:/var/lib/mysql'
-    ports:
-      - "3306:3306" # Porta padrão 3306 exposta no host
-    networks:
-      - traefik-net
+      - MYSQL_DATABASE=wordpress
+      - MYSQL_USER=wordpress
+      - MYSQL_PASSWORD=\${WP_DB_PASS}
+      - MYSQL_ROOT_PASSWORD=\${MYSQL_ROOT_PASS}
+    volumes: [ 'mysql_data:/var/lib/mysql' ]
+    networks: [ traefik-net ]
 
-  # PHPMYADMIN (Interface para MySQL)
+EOF
+    fi
+
+    if [ "$ENABLE_MINIO" = true ]; then
+        cat <<EOF
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=\${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=\${MINIO_ROOT_PASSWORD}
+      - MINIO_SERVER_URL=https://\${DOMAIN_MINIO_API}
+      - MINIO_BROWSER_REDIRECT_URL=https://\${DOMAIN_MINIO_CONSOLE}
+      - MINIO_API_CORS_ALLOW_ORIGIN=*
+    volumes:
+      - minio_data:/data
+    networks: [ traefik-net ]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio-api.rule=Host(\`\${DOMAIN_MINIO_API}\`)"
+      - "traefik.http.routers.minio-api.service=minio-api"
+      - "traefik.http.routers.minio-api.tls.certresolver=letsencryptresolver"
+      - "traefik.http.services.minio-api.loadbalancer.server.port=9000"
+      - "traefik.http.routers.minio-console.rule=Host(\`\${DOMAIN_MINIO_CONSOLE}\`)"
+      - "traefik.http.routers.minio-console.service=minio-console"
+      - "traefik.http.routers.minio-console.tls.certresolver=letsencryptresolver"
+      - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
+
+  minio_init:
+    image: minio/mc
+    depends_on: [ minio ]
+    networks: [ traefik-net ]
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set myminio http://minio:9000 \${MINIO_ROOT_USER} \${MINIO_ROOT_PASSWORD}); do echo 'Aguardando MinIO...'; sleep 5; done;
+      mc mb --ignore-existing myminio/typebot;
+      mc mb --ignore-existing myminio/evolution;
+      mc mb --ignore-existing myminio/n8n;
+      mc anonymous set download myminio/typebot;
+      mc anonymous set download myminio/evolution;
+      exit 0;
+      "
+EOF
+    fi
+
+    if [ "$ENABLE_N8N" = true ]; then
+        cat <<EOF
+  n8n_editor:
+    <<: *n8n-shared
+    container_name: 'n8n_editor'
+    command: start
+    ports: ["5678:5678"]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.n8n.rule=Host(\`\${DOMAIN_N8N}\`)'
+      - 'traefik.http.routers.n8n.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.n8n.loadbalancer.server.port=5678'
+  n8n_webhook:
+    <<: *n8n-shared
+    container_name: 'n8n_webhook'
+    command: webhook
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.n8n-webhook.rule=Host(\`\${DOMAIN_N8N_WEBHOOK}\`)'
+      - 'traefik.http.routers.n8n-webhook.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.n8n-webhook.loadbalancer.server.port=5678'
+  n8n_worker:
+    <<: *n8n-shared
+    container_name: 'n8n_worker'
+    command: worker --concurrency=10
+
+EOF
+    fi
+
+    if [ "$ENABLE_EVOLUTION" = true ]; then
+        S3_EVO_CONFIG=""
+        if [ "$ENABLE_MINIO" = true ]; then
+            S3_EVO_CONFIG="
+      - STORE_TYPE=s3
+      - S3_ENABLED=true
+      - S3_ACCESS_KEY=\${MINIO_ROOT_USER}
+      - S3_SECRET_KEY=\${MINIO_ROOT_PASSWORD}
+      - S3_BUCKET=evolution
+      - S3_PORT=443
+      - S3_ENDPOINT=\${DOMAIN_MINIO_API}
+      - S3_USE_SSL=true
+      - S3_REGION=us-east-1"
+        fi
+        cat <<EOF
+  evolutionAPI:
+    image: 'evoapicloud/evolution-api:v2.3.7'
+    container_name: 'evolutionAPI'
+    restart: always
+    environment:
+      - SERVER_URL=https://\${DOMAIN_EVOLUTION}
+      - AUTHENTICATION_API_KEY=\${EVOLUTION_API_KEY}
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:\${PG_PASS_EVO}@n8n_postgres:5432/evolution
+      - DATABASE_CLIENT_NAME=evolution_exchange
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://:\${REDIS_PASSWORD}@redis_cache:6379/1
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      $S3_EVO_CONFIG
+    depends_on:
+      redis_cache: { condition: service_started }
+      n8n_postgres: { condition: service_healthy }
+    volumes:
+      - 'evolution_store:/evolution/store'
+      - 'evolution_instances:/evolution/instances'
+    networks: [ traefik-net ]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.evolutionAPI.rule=Host(\`\${DOMAIN_EVOLUTION}\`)'
+      - 'traefik.http.routers.evolutionAPI.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.evolutionAPI.loadbalancer.server.port=8080'
+
+EOF
+    fi
+
+    if [ "$ENABLE_TYPEBOT" = true ]; then
+        S3_TB_CONFIG=""
+        if [ "$ENABLE_MINIO" = true ]; then
+            # CORREÇÃO CRÍTICA AQUI: S3_ENDPOINT sem HTTPS para Typebot (Fix V5.5)
+            S3_TB_CONFIG="
+      - S3_ENDPOINT=\${DOMAIN_MINIO_API}
+      - S3_ACCESS_KEY=\${MINIO_ROOT_USER}
+      - S3_SECRET_KEY=\${MINIO_ROOT_PASSWORD}
+      - S3_BUCKET=typebot
+      - S3_PORT=443
+      - S3_SSL=true
+      - S3_REGION=us-east-1
+      - S3_FORCE_PATH_STYLE=true"
+        fi
+        cat <<EOF
+  typebot_builder:
+    image: baptistearno/typebot-builder:latest
+    container_name: typebot_builder
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://typebot:\${PG_PASS_TYPEBOT}@n8n_postgres:5432/typebot
+      - NEXTAUTH_URL=https://\${DOMAIN_TYPEBOT}
+      - NEXT_PUBLIC_VIEWER_URL=https://\${DOMAIN_TYPEBOT_VIEWER}
+      - ENCRYPTION_SECRET=\${TYPEBOT_ENC_KEY}
+      - ADMIN_EMAIL=\${EMAIL_SSL}
+      - SMTP_HOST=\${SMTP_HOST}
+      - SMTP_PORT=\${SMTP_PORT}
+      - SMTP_USERNAME=\${SMTP_USER}
+      - SMTP_PASSWORD=\${SMTP_PASS}
+      - NEXT_PUBLIC_SMTP_FROM=\${SMTP_FROM}
+      $S3_TB_CONFIG
+    depends_on:
+      n8n_postgres: { condition: service_healthy }
+    networks: [ traefik-net ]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.typebot-builder.rule=Host(\`\${DOMAIN_TYPEBOT}\`)'
+      - 'traefik.http.routers.typebot-builder.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.typebot-builder.loadbalancer.server.port=3000'
+  typebot_viewer:
+    image: baptistearno/typebot-viewer:latest
+    container_name: typebot_viewer
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://typebot:\${PG_PASS_TYPEBOT}@n8n_postgres:5432/typebot
+      - NEXT_PUBLIC_VIEWER_URL=https://\${DOMAIN_TYPEBOT_VIEWER}
+      - NEXTAUTH_URL=https://\${DOMAIN_TYPEBOT}
+      - ENCRYPTION_SECRET=\${TYPEBOT_ENC_KEY}
+      $S3_TB_CONFIG
+    networks: [ traefik-net ]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.typebot-viewer.rule=Host(\`\${DOMAIN_TYPEBOT_VIEWER}\`)'
+      - 'traefik.http.routers.typebot-viewer.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.typebot-viewer.loadbalancer.server.port=3000'
+
+EOF
+    fi
+
+    if [ "$ENABLE_WORDPRESS" = true ]; then
+        cat <<EOF
+  wordpress:
+    image: wordpress:latest
+    container_name: wordpress
+    restart: always
+    depends_on: [ mysql_db ]
+    environment:
+      - WORDPRESS_DB_HOST=mysql_db:3306
+      - WORDPRESS_DB_USER=wordpress
+      - WORDPRESS_DB_PASSWORD=\${WP_DB_PASS}
+      - WORDPRESS_DB_NAME=wordpress
+      - SMTP_HOST=\${WP_SMTP_HOST}
+      - SMTP_PORT=\${WP_SMTP_PORT}
+      - SMTP_USER=\${WP_SMTP_USER}
+      - SMTP_PASS=\${WP_SMTP_PASS}
+      - SMTP_FROM=\${WP_SMTP_FROM}
+    networks: [ traefik-net ]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.wordpress.rule=Host(\`\${DOMAIN_WORDPRESS}\`)'
+      - 'traefik.http.routers.wordpress.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.wordpress.loadbalancer.server.port=80'
+
+EOF
+    fi
+
+    if [ "$ENABLE_PORTAINER" = true ]; then
+        cat <<EOF
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: always
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock'
+      - 'portainer_data:/data'
+    networks: [ traefik-net ]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.portainer.rule=Host(\`\${DOMAIN_PORTAINER}\`)'
+      - 'traefik.http.routers.portainer.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.portainer.loadbalancer.server.port=9000'
+
+EOF
+    fi
+
+    if [ "$ENABLE_RABBIT" = true ]; then
+        cat <<EOF
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: always
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=\${RABBIT_PASS}
+    networks: [ traefik-net ]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.rabbitmq.rule=Host(\`\${DOMAIN_RABBIT}\`)'
+      - 'traefik.http.routers.rabbitmq.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.rabbitmq.loadbalancer.server.port=15672'
+
+EOF
+    fi
+
+    if [ "$ENABLE_PGADMIN" = true ]; then
+        cat <<EOF
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    restart: always
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=\${EMAIL_SSL}
+      - PGADMIN_DEFAULT_PASSWORD=\${PGADMIN_PASS}
+      - PGADMIN_LISTEN_ADDRESS=0.0.0.0
+    networks: [ traefik-net ]
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.pgadmin.rule=Host(\`\${DOMAIN_PGADMIN}\`)'
+      - 'traefik.http.routers.pgadmin.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.pgadmin.loadbalancer.server.port=80'
+
+EOF
+    fi
+
+    if [ "$ENABLE_PMA" = true ]; then
+        cat <<EOF
   phpmyadmin:
     image: phpmyadmin/phpmyadmin:latest
     container_name: 'phpmyadmin'
-    restart: unless-stopped
-    depends_on:
-      - mysql_db
+    depends_on: [ mysql_db ]
     environment:
-      - 'PMA_HOST=mysql_db' # Conecta ao serviço mysql_db
-      - 'MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}'
-      - 'PMA_PORT=3306'
-      - 'PMA_ARBITRARY=0'
-    networks:
-      - traefik-net
+      - PMA_HOST=mysql_db
+      - PMA_ARBITRARY=0
+    networks: [ traefik-net ]
     labels:
-      # Roteamento do phpMyAdmin (Acesso via Traefik)
       - 'traefik.enable=true'
-      - 'traefik.http.routers.pma.rule=Host(`${DOMAIN_PMA}`)'
-      - 'traefik.http.services.pma.loadbalancer.server.port=80'
-      - 'traefik.http.routers.pma.entrypoints=websecure'
+      - 'traefik.http.routers.pma.rule=Host(\`\${DOMAIN_PMA}\`)'
       - 'traefik.http.routers.pma.tls.certresolver=letsencryptresolver'
+      - 'traefik.http.services.pma.loadbalancer.server.port=80'
 
+EOF
+    fi
+
+    cat <<EOF
 networks:
   traefik-net:
     driver: bridge
-    name: traefik-net
-
-# Definição dos Volumes Persistentes
 volumes:
   portainer_data:
-    name: portainer_data
   redis_data:
   postgres_data:
   n8n_data:
   mysql_data:
+  evolution_store:
+  evolution_instances:
+  minio_data:
 EOF
-    log_info "Arquivo docker-compose.yml (Cluster N8N V1.0) criado."
+    ) | tr -d '\r' > "$INSTALL_DIR/docker-compose.yml"
 }
 
-#==============================================================================
-# 5. Execução e Relatório Final
-#==============================================================================
+# --- ETAPA 4: DEPLOY ---
 
 deploy_stack() {
-    clear
-    log_step "ETAPA 3/3: INICIANDO DEPLOY COM DOCKER COMPOSE"
-
+    print_header
+    echo -e "${CYAN}--- DEPLOY ---${NC}"
     cd $INSTALL_DIR
-
-    log_info "Baixando imagens necessárias (Pull)..."
+    set -a; source .env; set +a
     docker compose pull
 
-    log_info "Subindo a stack (Traefik, DBs, N8N Cluster)..."
-    docker compose up -d --remove-orphans
+    if [ "$NEED_POSTGRES" = true ] || [ "$NEED_MYSQL" = true ]; then
+        log_info "Subindo Bancos & MinIO..."
+        SERVICES=""
+        [ "$NEED_POSTGRES" = true ] && SERVICES="$SERVICES n8n_postgres"
+        [ "$NEED_MYSQL" = true ] && SERVICES="$SERVICES mysql_db"
+        [ "$ENABLE_MINIO" = true ] && SERVICES="$SERVICES minio minio_init"
+        docker compose up -d $SERVICES
+    fi
 
-    log_info "Stack inicializada com sucesso! (N8N Queue Mode V1.0)"
+    if [ "$NEED_POSTGRES" = true ]; then
+        log_info "Aguardando Postgres..."
+        until docker exec n8n_postgres pg_isready -U n8n_user -d n8n > /dev/null 2>&1; do sleep 2; done
+        create_pg_db() {
+            local DB=$1; local USER=$2; local PASS=$3
+            docker exec n8n_postgres psql -U n8n_user -d n8n -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '$USER') THEN CREATE USER $USER WITH PASSWORD '$PASS'; END IF; END \$\$;" >/dev/null 2>&1
+            if ! docker exec n8n_postgres psql -U n8n_user -d n8n -tAc "SELECT 1 FROM pg_database WHERE datname='$DB'" | grep -q 1; then
+                 docker exec n8n_postgres psql -U n8n_user -d n8n -c "CREATE DATABASE $DB OWNER $USER;" >/dev/null 2>&1
+            fi
+            docker exec n8n_postgres psql -U n8n_user -d n8n -c "GRANT ALL PRIVILEGES ON DATABASE $DB TO $USER;" >/dev/null 2>&1
+            docker exec n8n_postgres psql -U n8n_user -d $DB -c "GRANT ALL ON SCHEMA public TO $USER;" >/dev/null 2>&1
+        }
+        [ "$ENABLE_EVOLUTION" = true ] && create_pg_db "evolution" "evolution" "${PG_PASS_EVO}"
+        [ "$ENABLE_TYPEBOT" = true ] && create_pg_db "typebot" "typebot" "${PG_PASS_TYPEBOT}"
+    fi
+
+    log_info "Subindo restante..."
+    docker compose up -d
 }
+
+# --- ETAPA 5: RELATÓRIO ---
 
 generate_report() {
-    # Coleta o IP atual do servidor
-    IP=$(hostname -I | awk '{print $1}')
-    REPORT_FILE="/root/CREDENCIAIS_V1.0.txt"
-
-    # Salva o relatório de credenciais no arquivo
-    cat > "$REPORT_FILE" <<EOF
-=====================================================
-      INSTALAÇÃO FINALIZADA - V1.0 (QUEUE MODE)
-=====================================================
-
-DATA:          $(date)
-IP SERVIDOR:   ${IP}
-DIRETÓRIO DA STACK: ${INSTALL_DIR}
-
-ACESSOS WEB (SSL via Let's Encrypt - Traefik):
------------------------------------------
-Traefik Dash:  https://${DOMAIN_TRAEFIK}
-   User: admin
-   Pass: ${TRAEFIK_DASH_PASS_RAW}
-
-Portainer:     https://${DOMAIN_PORTAINER} (Versão 2.20.2)
-N8N Editor:    https://${DOMAIN_N8N}
-N8N Webhook:   https://${DOMAIN_N8N_WEBHOOK}
-phpMyAdmin:    https://${DOMAIN_PMA}
-
-ACESSOS DIRETOS (SEM SSL, via IP e Porta):
------------------------------------------
-N8N Editor:    http://${IP}:5678 (Acesso API ou Interface)
-PostgreSQL:    http://${IP}:5432
-MySQL:         http://${IP}:3306
-
-CREDENCIAIS DE BANCO DE DADOS:
------------------------------------------
-POSTGRES (n8n_postgres:5432) - DEDICADO AO N8N:
-   User: n8n_user
-   Pass: ${POSTGRES_PASSWORD_N8N_VAL}
-   DB:   n8n
-
-MYSQL (mysql_db:3306) - DADOS GERAIS:
-   Host Port: 3306
-   Root Pass: ${MYSQL_ROOT_PASSWORD_VAL}
-   User:      n8n_mysql_user
-   Pass:      ${MYSQL_USER_PASSWORD_VAL}
-   DB Padrão: infoproduct
-
-N8N (Cluster/Queue Mode Secrets):
------------------------------------------
-REDIS Password: ${REDIS_PASSWORD_VAL}
-Encryption Key: ${N8N_ENCRYPTION_KEY_VAL}
-
-Comandos Rápidos (Executar em ${INSTALL_DIR}):
-- Para parar:    docker compose stop
-- Para subir:    docker compose up -d
-- Para remover:  docker compose down
-=====================================================
-EOF
-
-    # Imprime a versão colorida no terminal
     clear
-    log_step "DEPLOY CONCLUÍDO! (V1.0 - Lançamento Final)"
+    C_BORDER=$BLUE
+    C_LABEL=$WHITE
+    C_VAL=$CYAN
+    C_TITLE=$MAGENTA
 
-    echo -e "${MAGENTA}${BOLD}================================================================${NC}"
-    echo -e "${MAGENTA}${BOLD}             RESUMO DE INSTALAÇÃO - STACK V1.0                  ${NC}"
-    echo -e "${MAGENTA}${BOLD}================================================================${NC}"
-    echo -e "Data/Hora:     ${GREEN}$(date)${NC}"
-    echo -e "IP Servidor:   ${GREEN}${IP}${NC}"
-    echo -e "Diretório Base:  ${GREEN}${INSTALL_DIR}${NC}"
+    draw_line() { printf "${C_BORDER} +%s+ ${NC}\n" "$(printf "%-70s" | tr ' ' '-')"; }
+    draw_row() { printf "${C_BORDER} | ${C_LABEL}%-20s ${C_BORDER}| ${C_VAL}%-46s ${C_BORDER}| ${NC}\n" "$1" "$2"; }
+    draw_title() { printf "${C_BORDER} | ${C_TITLE}%-68s ${C_BORDER}| ${NC}\n" "$1"; }
 
-    echo -e "\n${RED}${BOLD}>> AVISO IMPORTANTE (Traefik/SSL - Rate Limit)${NC}"
-    echo -e "----------------------------------------------------------------"
-    echo -e "Se houver erro de certificado (código 429), o Let's Encrypt pode ter"
-    echo -e "aplicado um limite de taxa. Solução: Espere 7 dias ou renomeie"
-    echo -e "o arquivo ${YELLOW}acme.json${NC} em ${YELLOW}${INSTALL_DIR}/traefik/${NC} e tente novos subdomínios."
+    echo ""
+    draw_line
+    draw_title "DNS CHECKLIST"
+    draw_line
+    echo -e "${YELLOW} Aponte para o IP deste servidor:${NC}"
+    [ "$ENABLE_TRAEFIK" = true ] && echo -e " -> ${WHITE}${DOMAIN_TRAEFIK}${NC}"
+    [ "$ENABLE_PORTAINER" = true ] && echo -e " -> ${WHITE}${DOMAIN_PORTAINER}${NC}"
+    [ "$ENABLE_MINIO" = true ] && echo -e " -> ${WHITE}${DOMAIN_MINIO_CONSOLE}${NC} e ${WHITE}${DOMAIN_MINIO_API}${NC}"
+    [ "$ENABLE_N8N" = true ] && echo -e " -> ${WHITE}${DOMAIN_N8N}${NC}"
+    [ "$ENABLE_N8N" = true ] && echo -e " -> ${WHITE}${DOMAIN_N8N_WEBHOOK}${NC}"
+    [ "$ENABLE_TYPEBOT" = true ] && echo -e " -> ${WHITE}${DOMAIN_TYPEBOT}${NC}"
+    [ "$ENABLE_TYPEBOT" = true ] && echo -e " -> ${WHITE}${DOMAIN_TYPEBOT_VIEWER}${NC}"
+    [ "$ENABLE_EVOLUTION" = true ] && echo -e " -> ${WHITE}${DOMAIN_EVOLUTION}${NC}"
+    [ "$ENABLE_WORDPRESS" = true ] && echo -e " -> ${WHITE}${DOMAIN_WORDPRESS}${NC}"
+    [ "$ENABLE_RABBIT" = true ] && echo -e " -> ${WHITE}${DOMAIN_RABBIT}${NC}"
+    [ "$ENABLE_PGADMIN" = true ] && echo -e " -> ${WHITE}${DOMAIN_PGADMIN}${NC}"
+    [ "$ENABLE_PMA" = true ] && echo -e " -> ${WHITE}${DOMAIN_PMA}${NC}"
+    echo ""
+    draw_line
 
-    echo -e "\n${MAGENTA}${BOLD}>> ACESSOS WEB (SSL via Traefik/Let's Encrypt)${NC}"
-    echo -e "----------------------------------------------------------------"
-    echo -e "Traefik Dash:  ${CYAN}https://${DOMAIN_TRAEFIK}${NC}"
-    echo -e "   ${YELLOW}User: admin | Pass: ${TRAEFIK_DASH_PASS_RAW}${NC}"
-    echo -e "Portainer:     ${CYAN}https://${DOMAIN_PORTAINER}${NC}"
-    echo -e "N8N Editor:    ${CYAN}https://${DOMAIN_N8N}${NC}"
-    echo -e "N8N Webhook:   ${CYAN}https://${DOMAIN_N8N_WEBHOOK}${NC}"
-    echo -e "phpMyAdmin:    ${CYAN}https://${DOMAIN_PMA}${NC}"
+    draw_title "CREDENCIAIS"
+    draw_line
+    draw_row "Traefik" "admin / ${TRAEFIK_PASS}"
+    if [ "$ENABLE_MINIO" = true ]; then
+        draw_row "MinIO Console" "https://${DOMAIN_MINIO_CONSOLE}"
+        draw_row "MinIO API" "https://${DOMAIN_MINIO_API}"
+        draw_row "User/Pass" "${MINIO_ROOT_USER} / ${MINIO_ROOT_PASSWORD}"
+    fi
+    if [ "$ENABLE_PORTAINER" = true ]; then draw_row "Portainer" "https://${DOMAIN_PORTAINER}"; fi
+    if [ "$ENABLE_N8N" = true ]; then draw_row "N8N" "https://${DOMAIN_N8N}"; fi
+    if [ "$ENABLE_TYPEBOT" = true ]; then draw_row "Typebot" "https://${DOMAIN_TYPEBOT}"; fi
+    if [ "$ENABLE_EVOLUTION" = true ]; then draw_row "Evolution" "https://${DOMAIN_EVOLUTION}"; fi
+    if [ "$ENABLE_WORDPRESS" = true ]; then draw_row "WordPress" "https://${DOMAIN_WORDPRESS}"; fi
+    if [ "$ENABLE_PGADMIN" = true ]; then draw_row "pgAdmin" "https://${DOMAIN_PGADMIN}"; draw_row "User/Pass" "${EMAIL_SSL} / ${PGADMIN_PASS}"; fi
+    if [ "$ENABLE_PMA" = true ]; then draw_row "phpMyAdmin" "https://${DOMAIN_PMA}"; fi
+    if [ "$ENABLE_RABBIT" = true ]; then draw_row "RabbitMQ" "https://${DOMAIN_RABBIT}"; draw_row "User/Pass" "admin / ${RABBIT_PASS}"; fi
+    
+    draw_line
+    if [ "$NEED_POSTGRES" = true ]; then
+        draw_title "POSTGRESQL (Host: n8n_postgres)"
+        if [ "$ENABLE_N8N" = true ]; then draw_row "N8N User/Pass" "n8n_user / ${PG_PASS_N8N}"; fi
+        if [ "$ENABLE_EVOLUTION" = true ]; then draw_row "Evolution Pass" "evolution / ${PG_PASS_EVO}"; fi
+        if [ "$ENABLE_TYPEBOT" = true ]; then draw_row "Typebot Pass" "typebot / ${PG_PASS_TYPEBOT}"; fi
+        draw_line
+    fi
 
-    echo -e "\n${MAGENTA}${BOLD}>> CREDENCIAIS DE BANCO DE DADOS E N8N SECRETS${NC}"
-    echo -e "----------------------------------------------------------------"
-    echo -e "POSTGRES (n8n_postgres) N8N DB:   ${YELLOW}User: n8n_user | Pass: ${POSTGRES_PASSWORD_N8N_VAL}${NC}"
-    echo -e "MYSQL (mysql_db) Dados Gerais:    ${YELLOW}Root Pass: ${MYSQL_ROOT_PASSWORD_VAL}${NC}"
-    echo -e "N8N Encrypt Key (CRUCIAL!):  ${YELLOW}${N8N_ENCRYPTION_KEY_VAL}\n${NC}"
+    if [ "$NEED_REDIS" = true ]; then
+        draw_title "REDIS CACHE/QUEUE"
+        draw_row "Host Docker" "redis_cache:6379"
+        draw_row "Password" "${REDIS_PASS}"
+        draw_line
+    fi
 
-    echo -e "\n${MAGENTA}${BOLD}================================================================${NC}"
-    echo -e "${GREEN}As credenciais foram salvas em ${REPORT_FILE}${NC}"
+    draw_title "SEGREDOS & CHAVES"
+    if [ "$ENABLE_TYPEBOT" = true ]; then draw_row "Typebot Enc Key" "${TYPEBOT_ENC_KEY}"; fi
+    if [ "$ENABLE_N8N" = true ]; then draw_row "N8N Enc Key" "${N8N_KEY}"; fi
+    if [ "$NEED_REDIS" = true ]; then draw_row "Redis Pass" "${REDIS_PASS}"; fi
+    if [ "$ENABLE_EVOLUTION" = true ]; then draw_row "Evolution API Key" "${EVO_API_KEY}"; fi
+    draw_line
+    echo -e "${WHITE} Configs em: ${BOLD}${INSTALL_DIR}/.env${NC}\n"
 }
 
-#==============================================================================
-# MAIN (Orquestração do Fluxo de Instalação)
-#==============================================================================
-
 main() {
-    main_preamble
-
-    if [ "$(id -u)" -ne 0 ]; then log_error "Execute como ROOT: sudo ./install.sh"; fi
-
-    read # PAUSA 1: Inicia a coleta de domínios.
-
-    # 1. Instalação de Base (limpa a tela e começa)
+    load_state
+    ask_cleanup
     install_base_deps
-
-    # 2. Verifica portas e coleta info (INTERATIVO)
-    check_ports
+    selection_menu
     collect_info
-
-    echo -e "\n${YELLOW}${BOLD}>> ETAPA 1 CONCLUÍDA (Pré-requisitos e Configuração de Domínios). PRÓXIMA: Instalação do Docker.${NC}"
-    auto_continue # PAUSA 2: Automática (3s)
-
-    # 3. Instala Docker
-    install_docker
-
-    echo -e "\n${YELLOW}${BOLD}>> ETAPA 2 CONCLUÍDA (Docker). PRÓXIMA: Configuração da Stack e Deploy.${NC}"
-    auto_continue # PAUSA 3: Automática (3s)
-
-    # 4. Prepara arquivos e faz o deploy
-    prepare_files
+    generate_files
     deploy_stack
     generate_report
 }
