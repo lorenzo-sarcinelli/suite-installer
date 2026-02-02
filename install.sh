@@ -2,8 +2,8 @@
 set -e
 
 #==============================================================================
-# TWOBRAIN INSTALLER V6.5.0 - "Clean Vars & Full Stack Fix"
-# Correções: Remoção de escapes (\) incorretos, correção de hosts DB/Redis
+# TWOBRAIN INSTALLER V6.6.0 - "Robust & MySQL Tuned"
+# Correções: crontab portável, DOMAIN_TRAEFIK, MySQL 4GB/50% RAM, cross-platform
 # Estrutura: Editor + Webhook + Worker separados
 #==============================================================================
 
@@ -19,17 +19,21 @@ ENABLE_EVOLUTION=false; ENABLE_WORDPRESS=false; ENABLE_RABBIT=false
 ENABLE_PGADMIN=false; ENABLE_PMA=false
 NEED_POSTGRES=false; NEED_MYSQL=false; NEED_REDIS=false
 PREVIOUS_INSTALL=false
+# Traefik: usar proxy existente (Coolify/etc) ou próprio (80/443 ou portas alternativas)
+USE_EXISTING_TRAEFIK=false
+TRAEFIK_ALT_PORTS=false
 
 print_header() {
-    clear
+    clear    
     echo -e "${MAGENTA}${BOLD}"
     cat << "EOF"
-████████╗██╗    ██╗ ██████╗      ██████╗ ██████╗  █████╗ ██╗███╗   ██╗
-╚══██╔══╝██║    ██║██╔═══██╗     ██╔══██╗██╔══██╗██╔══██╗██║████╗  ██║
-   ██║   ██║ █╗ ██║██║   ██║     ██████╔╝██████╔╝███████║██║██╔██╗ ██║
-   ██║   ╚███╔███╔╝╚██████╔╝     ██████╔╝██║  ██║██║  ██║██║██║ ╚████║
-   ╚═╝    ╚══╝╚══╝  ╚═════╝      ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝
-                                Docker Swarm Automation Stack
+ ████████╗██╗    ██╗ ██████╗ ██████╗ ██████╗  █████╗ ██╗███╗  ██╗
+ ╚══██╔══╝██║    ██║██╔═══██╗██╔══██╗██╔══██╗██╔══██╗██║████╗ ██║
+    ██║   ██║ █╗ ██║██║   ██║██████╔╝██████╔╝███████║██║██╔██╗██║
+    ██║   ██║███╗██║██║   ██║██╔══██╗██╔══██╗██║  ██║██║██║╚████║
+    ██║   ╚███╔███╔╝╚██████╔╝██████╔╝██║  ██║██║  ██║██║██║ ╚███║
+    ╚═╝    ╚══╝╚══╝  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚══╝
+                 > Docker Swarm Automation Stack <
 EOF
     echo -e "${NC}"
 }
@@ -37,6 +41,33 @@ EOF
 log_info() { echo -e "${GREEN}[✓]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[⚠]${NC} $1"; }
 log_error() { echo -e "${RED}[✗]${NC} $1"; }
+
+# Lista redes overlay atuais: nome e subnet (para detectar overlap, sem chumbar "ingress")
+list_overlay_networks() {
+    for id in $(docker network ls -f driver=overlay -q 2>/dev/null); do
+        name=$(docker network inspect "$id" --format '{{.Name}}' 2>/dev/null)
+        sub=$(docker network inspect "$id" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null)
+        [ -n "$name" ] && echo "  $name -> ${sub:-sem subnet}"
+    done
+}
+
+# Obtém IPv4 público da máquina (para DNS). Fallback: IP local.
+get_public_ipv4() {
+    local ip
+    local urls="https://api.ipify.org https://icanhazip.com https://ifconfig.me/ip https://ipecho.net/plain"
+    for url in $urls; do
+        ip=$(curl -s -4 --connect-timeout 3 --max-time 5 "$url" 2>/dev/null | tr -d '\r\n')
+        if [[ -n "$ip" && "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
+    # Fallback: IP local (hostname -I ou hostname -i)
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}' | head -n1)
+    [ -z "$ip" ] && ip=$(hostname -i 2>/dev/null)
+    [ -z "$ip" ] && ip="127.0.0.1"
+    echo "$ip"
+}
 
 load_state() {
     [ -f "$INSTALL_DIR/.env" ] && {
@@ -67,8 +98,10 @@ ask_cleanup() {
                     log_warn "Destruindo ambiente..."
                     docker stack rm twobrain 2>/dev/null || true
                     sleep 10
-                    # Força limpeza de volumes específicos da stack
-                    docker volume rm $(docker volume ls -q | grep twobrain) 2>/dev/null || true
+                    # Força limpeza de volumes específicos da stack (evita erro com lista vazia)
+                    for vol in $(docker volume ls -q 2>/dev/null | grep twobrain || true); do
+                        docker volume rm "$vol" 2>/dev/null || true
+                    done
                     # Remove rede externalizada se existir
                     docker network rm traefik-net 2>/dev/null || true
                     rm -rf $INSTALL_DIR
@@ -93,19 +126,119 @@ install_base_deps() {
     
     if ! command -v docker >/dev/null; then
         log_info "Instalando Docker..."
-        apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            ca-certificates curl gnupg apache2-utils openssl git whiptail lsb-release
-        curl -fsSL https://get.docker.com | sh > /dev/null 2>&1
-        usermod -aG docker $(logname) 2>/dev/null || true
-        log_info "Docker instalado"
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq 2>/dev/null || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                ca-certificates curl gnupg apache2-utils openssl git whiptail lsb-release 2>/dev/null || true
+        fi
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL https://get.docker.com | sh > /dev/null 2>&1 || true
+        fi
+        if command -v docker >/dev/null 2>&1; then
+            DOCKER_USER=$(logname 2>/dev/null || echo "${SUDO_USER:-root}")
+            usermod -aG docker "$DOCKER_USER" 2>/dev/null || true
+            log_info "Docker instalado"
+        else
+            log_error "Docker não foi instalado. Instale manualmente e execute o script novamente."
+            exit 1
+        fi
     fi
     
     if ! docker info 2>/dev/null | grep -q "Swarm: active"; then
         log_info "Inicializando Docker Swarm..."
-        docker swarm init --advertise-addr $(hostname -I | awk '{print $1}')
+        SWARM_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' | head -n1)
+        [ -z "$SWARM_ADDR" ] && SWARM_ADDR=$(hostname -i 2>/dev/null) || SWARM_ADDR="127.0.0.1"
+        docker swarm init --advertise-addr "$SWARM_ADDR"
         log_info "Swarm ativo"
     fi
+}
+
+# Libera portas no firewall: SSH, HTTP/HTTPS, Traefik alt (8081/8444) e admin (8080)
+open_firewall_ports() {
+    print_header
+    echo -e "${CYAN}══════════════════════════════════${NC}"
+    echo -e "${CYAN}   FIREWALL (portas necessárias)${NC}"
+    echo -e "${CYAN}══════════════════════════════════${NC}\n"
+    echo -e "  ${WHITE}22${NC}   SSH"
+    echo -e "  ${WHITE}80${NC}   HTTP  (Let's Encrypt + redirect)"
+    echo -e "  ${WHITE}443${NC}  HTTPS (tráfego principal + autenticação)"
+    echo -e "  ${WHITE}8080${NC} Admin (opcional)"
+    echo -e "  ${WHITE}8081${NC} HTTP  alternativo (Traefik portas alt)"
+    echo -e "  ${WHITE}8444${NC} HTTPS alternativo (Traefik portas alt)\n"
+    
+    if command -v ufw >/dev/null 2>&1; then
+        log_info "Configurando UFW..."
+        ufw allow 22/tcp comment 'SSH' 2>/dev/null || true
+        ufw allow 80/tcp comment 'HTTP' 2>/dev/null || true
+        ufw allow 443/tcp comment 'HTTPS' 2>/dev/null || true
+        ufw allow 8080/tcp comment 'Admin' 2>/dev/null || true
+        ufw allow 8081/tcp comment 'Traefik HTTP alt' 2>/dev/null || true
+        ufw allow 8444/tcp comment 'Traefik HTTPS alt' 2>/dev/null || true
+        ufw --force enable 2>/dev/null || true
+        ufw reload 2>/dev/null || true
+        log_info "UFW: portas 22, 80, 443, 8080, 8081, 8444 liberadas"
+    elif command -v firewall-cmd >/dev/null 2>&1 && [ -r /run/firewalld ]; then
+        log_info "Configurando firewalld..."
+        firewall-cmd -q --permanent --add-service=ssh 2>/dev/null || true
+        firewall-cmd -q --permanent --add-service=http 2>/dev/null || true
+        firewall-cmd -q --permanent --add-service=https 2>/dev/null || true
+        firewall-cmd -q --permanent --add-port=8080/tcp 2>/dev/null || true
+        firewall-cmd -q --permanent --add-port=8081/tcp 2>/dev/null || true
+        firewall-cmd -q --permanent --add-port=8444/tcp 2>/dev/null || true
+        firewall-cmd -q --reload 2>/dev/null || true
+        log_info "firewalld: portas 22, 80, 443, 8080, 8081, 8444 liberadas"
+    else
+        log_warn "Nenhum firewall (ufw/firewalld) detectado."
+        echo -e "  ${YELLOW}No painel da VPS/cloud, libere:${NC}"
+        echo -e "  ${WHITE}TCP 22, 80, 443, 8080, 8081, 8444${NC}\n"
+    fi
+    sleep 1
+}
+
+# Detecta se já existe Traefik/Coolify e pergunta: usar existente ou Traefik próprio (80/443 ou portas alt)
+ask_traefik_mode() {
+    print_header
+    echo -e "${CYAN}══════════════════════════════════${NC}"
+    echo -e "${CYAN}   PROXY REVERSO (Traefik)${NC}"
+    echo -e "${CYAN}══════════════════════════════════${NC}\n"
+    
+    DETECTED=""
+    docker service ls --format '{{.Name}}' 2>/dev/null | grep -qiE 'traefik|coolify|proxy' && DETECTED="serviço"
+    [ -z "$DETECTED" ] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qiE 'traefik|coolify|proxy' && DETECTED="container"
+    if [ -n "$DETECTED" ]; then
+        echo -e "${YELLOW}Possível Traefik/Coolify detectado neste servidor.${NC}"
+        echo -e "  (e) Usar proxy existente – stack sem Traefik, conecta na rede traefik-net"
+        echo -e "  (s) Segundo Traefik em portas 8081/8444 – evita conflito com 80/443"
+        echo -e "  (p) Traefik próprio em 80/443 – ignora o existente (pode conflitar)"
+        read -p "  Escolha [e/s/p, padrão: e]: " TRAEFIK_CHOICE
+        TRAEFIK_CHOICE=${TRAEFIK_CHOICE:-e}
+        case "$TRAEFIK_CHOICE" in
+            [eE]) USE_EXISTING_TRAEFIK=true;  TRAEFIK_ALT_PORTS=false ;;
+            [sS]) USE_EXISTING_TRAEFIK=false; TRAEFIK_ALT_PORTS=true ;;
+            *)    USE_EXISTING_TRAEFIK=false; TRAEFIK_ALT_PORTS=false ;;
+        esac
+    else
+        echo -e "  (n) Traefik próprio em 80/443 (padrão)"
+        echo -e "  (s) Traefik em portas 8081/8444 (se 80/443 já estiverem em uso)"
+        read -p "  Já existe Traefik/Coolify aqui? [n/s, padrão: n]: " TRAEFIK_CHOICE
+        TRAEFIK_CHOICE=${TRAEFIK_CHOICE:-n}
+        if [[ "$TRAEFIK_CHOICE" =~ ^[sS]$ ]]; then
+            USE_EXISTING_TRAEFIK=false
+            TRAEFIK_ALT_PORTS=true
+        else
+            USE_EXISTING_TRAEFIK=false
+            TRAEFIK_ALT_PORTS=false
+        fi
+    fi
+    
+    if [ "$USE_EXISTING_TRAEFIK" = true ]; then
+        log_info "Modo: usar proxy existente (Coolify/Traefik). Stack sem serviço Traefik."
+    elif [ "$TRAEFIK_ALT_PORTS" = true ]; then
+        log_info "Modo: Traefik em portas 8081 (HTTP) e 8444 (HTTPS)."
+    else
+        log_info "Modo: Traefik próprio em 80/443."
+    fi
+    sleep 1
 }
 
 selection_menu() {
@@ -194,6 +327,12 @@ collect_info() {
     SUB=${SUB:-portainer}
     DOMAIN_PORTAINER="${SUB}.${BASE_DOMAIN}"
     echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_PORTAINER}${NC}\n"
+    
+    echo -e "${CYAN}Traefik Dashboard:${NC}"
+    read -p "  [padrão: traefik]: " SUB
+    SUB=${SUB:-traefik}
+    DOMAIN_TRAEFIK="${SUB}.${BASE_DOMAIN}"
+    echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_TRAEFIK}${NC}\n"
     
     [ "$ENABLE_MINIO" = true ] && {
         echo -e "${CYAN}MinIO Storage:${NC}"
@@ -284,20 +423,103 @@ collect_info() {
     [ -z "$PGADMIN_PASS" ] && PGADMIN_PASS=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-12)
     [ -z "$MINIO_ROOT_PASSWORD" ] && MINIO_ROOT_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
     MINIO_ROOT_USER="admin"
+    
+    # MySQL InnoDB buffer: automático 50% ou valor definido (só se MySQL habilitado)
+    if [ "$NEED_MYSQL" = true ]; then
+        if [ -r /proc/meminfo ]; then
+            TOTAL_RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+            RAM_MB=$((TOTAL_RAM_KB / 1024))
+            AUTO_MB=$((RAM_MB / 2))
+            [ "${AUTO_MB:-0}" -lt 4096 ] && AUTO_MB=4096
+        else
+            RAM_MB=8192
+            AUTO_MB=4096
+        fi
+        echo -e "\n${CYAN}MySQL InnoDB buffer (RAM para tabelas/cache)${NC}"
+        echo -e "  RAM da máquina: ${WHITE}$((RAM_MB / 1024)) GB${NC} (50% = ${WHITE}$((AUTO_MB / 1024)) GB${NC})"
+        echo -e "  (a) Automático 50% da RAM  (d) Valor definido"
+        read -p "  Escolha [a/d, padrão: a]: " MYSQL_RAM_OPT
+        MYSQL_RAM_OPT=${MYSQL_RAM_OPT:-a}
+        if [[ "$MYSQL_RAM_OPT" =~ ^[Dd]$ ]]; then
+            # Opções pré-definidas compatíveis com a máquina (até 50%)
+            PREDEF="512 1024 2048 4096 8192 16384 32768"
+            MAX_MB=$AUTO_MB
+            [ "$RAM_MB" -lt "$MAX_MB" ] && MAX_MB=$RAM_MB
+            OPTIONS=""
+            for mb in $PREDEF; do
+                [ "$mb" -le "$MAX_MB" ] && OPTIONS="${OPTIONS:+$OPTIONS }$mb"
+            done
+            echo -e "  Opções compatíveis (até 50% = ${AUTO_MB}MB):"
+            i=1
+            for mb in $OPTIONS; do
+                [ -z "$mb" ] && continue
+                if [ "$mb" -ge 1024 ]; then
+                    label="$((mb/1024))G"
+                else
+                    label="${mb}M"
+                fi
+                echo -e "    ${i}) ${label} (${mb}MB)"
+                i=$((i+1))
+            done
+            echo -e "    0) Digitar valor em MB"
+            read -p "  Número ou MB [padrão: 4096]: " choice
+            choice=${choice:-4096}
+            if [ "$choice" = "0" ]; then
+                read -p "  Valor em MB: " MYSQL_BUFFER_MB
+                MYSQL_BUFFER_MB=${MYSQL_BUFFER_MB:-4096}
+            else
+                n=1
+                for mb in $OPTIONS; do
+                    [ -z "$mb" ] && continue
+                    if [ "$n" = "$choice" ]; then
+                        MYSQL_BUFFER_MB=$mb
+                        break
+                    fi
+                    n=$((n+1))
+                done
+                if [ -z "$MYSQL_BUFFER_MB" ]; then
+                    MYSQL_BUFFER_MB=$choice
+                fi
+            fi
+            MYSQL_BUFFER_MB=${MYSQL_BUFFER_MB:-4096}
+        else
+            MYSQL_BUFFER_MB=$AUTO_MB
+        fi
+        MYSQL_INNODB_BUFFER_POOL_SIZE="${MYSQL_BUFFER_MB}M"
+    fi
 }
 
 generate_files() {
     print_header
     log_info "Gerando configurações..."
     
+    # Garantir que variáveis de domínio estão definidas (evita Host(``) no Traefik)
+    if [ -z "$BASE_DOMAIN" ] || [ -z "$DOMAIN_PORTAINER" ]; then
+        log_error "Variáveis de domínio vazias (BASE_DOMAIN/DOMAIN_PORTAINER). Execute a instalação novamente e informe os domínios."
+        exit 1
+    fi
+    
     mkdir -p $INSTALL_DIR/traefik
     touch $INSTALL_DIR/traefik/acme.json && chmod 600 $INSTALL_DIR/traefik/acme.json
+    
+    [ "$NEED_MYSQL" = true ] && {
+        mkdir -p "$INSTALL_DIR/mysql/conf.d"
+        cat > "$INSTALL_DIR/mysql/conf.d/custom.cnf" <<MYSQLCNF
+[mysqld]
+innodb_buffer_pool_size=$MYSQL_INNODB_BUFFER_POOL_SIZE
+innodb_log_file_size=256M
+innodb_flush_log_at_trx_commit=2
+max_connections=200
+MYSQLCNF
+        log_info "MySQL config: buffer pool ${MYSQL_INNODB_BUFFER_POOL_SIZE}"
+    }
     
     cat > $INSTALL_DIR/.env <<EOF
 BASE_DOMAIN=$BASE_DOMAIN
 EMAIL_SSL=$EMAIL_SSL
 TRAEFIK_PASS=$TRAEFIK_PASS
 TRAEFIK_AUTH=$TRAEFIK_AUTH
+DOMAIN_TRAEFIK=$DOMAIN_TRAEFIK
 DOMAIN_PORTAINER=$DOMAIN_PORTAINER
 DOMAIN_MINIO_CONSOLE=$DOMAIN_MINIO_CONSOLE
 DOMAIN_MINIO_API=$DOMAIN_MINIO_API
@@ -336,19 +558,106 @@ ENABLE_WORDPRESS=$ENABLE_WORDPRESS
 ENABLE_RABBIT=$ENABLE_RABBIT
 ENABLE_PGADMIN=$ENABLE_PGADMIN
 ENABLE_PMA=$ENABLE_PMA
+USE_EXISTING_TRAEFIK=$USE_EXISTING_TRAEFIK
+TRAEFIK_ALT_PORTS=$TRAEFIK_ALT_PORTS
 EOF
 
     generate_compose
+    write_cloudflare_tutorial
+}
+
+# Tutorial: Cloudflare e portas (gravado em $INSTALL_DIR para o cliente)
+write_cloudflare_tutorial() {
+    TUT="$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt"
+    cat > "$TUT" <<'TUTORIAL_EOF'
+═══════════════════════════════════════════════════════════════
+  TUTORIAL: CLOUDFLARE E PORTAS (TWOBRAIN)
+═══════════════════════════════════════════════════════════════
+
+1. PORTAS A LIBERAR NO PAINEL DA VPS/CLOUD
+────────────────────────────────────────────
+No firewall do provedor (Security Groups, Firewall, Network):
+
+  TCP 22    – SSH (acesso ao servidor)
+  TCP 80    – HTTP (Let's Encrypt + redirect para HTTPS)
+  TCP 443   – HTTPS (tráfego principal e autenticação)
+  TCP 8080  – Admin (opcional)
+  TCP 8081  – HTTP alternativo (Traefik em portas alt)
+  TCP 8444  – HTTPS alternativo (Traefik em portas alt)
+
+Sem 80/443 ou 8081/8444 liberados, o Traefik não recebe tráfego
+e você não consegue acessar nem autenticar.
+
+2. CLOUDFLARE – O QUE CONFIGURAR
+────────────────────────────────────────────
+• SSL/TLS:
+  – Modo: Full ou Full (strict)
+  – Full (strict) exige certificado válido na origem (Let's Encrypt).
+
+• Proxy (ícone ao lado do registro DNS):
+  – Laranja (Proxied) = tráfego passa pelo Cloudflare (recomendado).
+  – Cinza (DNS only) = DNS aponta direto para o IP; SSL na origem.
+
+• Se usar Traefik em portas 8081/8444:
+  – No Cloudflare não dá para mudar porta por registro.
+  – Opção A: Proxy laranja + origem em 80/443 (se o Traefik estiver em 80/443).
+  – Opção B: Acessar direto https://SEU_IP:8444 ou configurar outro proxy na frente.
+
+3. REDES DOCKER (SWARM) – POSSÍVEIS PROBLEMAS
+────────────────────────────────────────────
+• "Pool overlaps": duas redes overlay usam a mesma faixa de IP.
+  – Liste quem usa o quê: docker network ls -f driver=overlay
+  – Para cada rede: docker network inspect NOME --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+  – Ou use o script: diagnose-docker-networks.sh
+  – Nossa rede (twobrain_traefik-net) usa 172.25.0.0/24. Se outra rede já usar essa ou uma faixa que a inclua, pode dar overlap.
+
+• Serviço Traefik em "Rejected":
+  – Confira as portas (80/443 ou 8081/8444) no firewall do SO (ufw/firewalld) e do painel da VPS.
+  – Confira redes: diagnose-docker-networks.sh e, se precisar, use outra subnet no compose.
+
+4. DEPLOY MANUAL (sempre carregue o .env)
+────────────────────────────────────────────
+Se rodar "docker stack deploy" à mão, as variáveis de domínio vêm do .env.
+Sem isso, o Traefik recebe Host(``) e dá "no domain was given".
+
+  cd /opt/stack
+  set -a && source .env && set +a
+  docker stack deploy -c docker-compose.yml twobrain
+
+5. RESUMO RÁPIDO
+────────────────────────────────────────────
+• Libere no painel: TCP 22, 80, 443, 8081, 8444 (e 8080 se usar).
+• Cloudflare: SSL Full ou Full (strict); proxy laranja se quiser passar pelo CF.
+• Erro "no domain was given": .env sem domínios ou deploy sem source .env (veja item 4).
+• Erro de rede: rode diagnose-docker-networks.sh e evite subnet em uso.
+TUTORIAL_EOF
+    log_info "Tutorial gravado: $TUT"
 }
 
 generate_compose() {
-    # MUDANÇA: Sem barras invertidas antes das variáveis dentro dos Heredocs
-    cat > $INSTALL_DIR/docker-compose.yml <<'COMPOSE_EOF'
-
+    # Rede: proxy existente = external; nosso Traefik = rede no compose com subnet fixa (evita overlap com outras redes overlay)
+    if [ "$USE_EXISTING_TRAEFIK" = true ]; then
+        cat > $INSTALL_DIR/docker-compose.yml <<'NET_EXT_EOF'
 networks:
   traefik-net:
     external: true
 
+NET_EXT_EOF
+    else
+        # Rede criada pela stack com subnet fixa (evita overlap com outras redes overlay já existentes)
+        cat > $INSTALL_DIR/docker-compose.yml <<'NET_INT_EOF'
+networks:
+  traefik-net:
+    driver: overlay
+    attachable: true
+    ipam:
+      config:
+        - subnet: 172.25.0.0/24
+
+NET_INT_EOF
+    fi
+
+    cat >> $INSTALL_DIR/docker-compose.yml <<'COMPOSE_EOF'
 volumes:
   traefik_certs:
   portainer_data:
@@ -358,25 +667,47 @@ volumes:
   minio_data:
 
 services:
+COMPOSE_EOF
+
+    # Traefik: só inclui se NÃO for usar proxy existente (Coolify)
+    # Portas em mode: host = abre direto no host, sem usar rede de publicação do Swarm (evita "Pool overlaps")
+    if [ "$USE_EXISTING_TRAEFIK" != true ]; then
+        if [ "$TRAEFIK_ALT_PORTS" = true ]; then
+            TRAEFIK_PUB_HTTP=8081
+            TRAEFIK_PUB_HTTPS=8444
+        else
+            TRAEFIK_PUB_HTTP=80
+            TRAEFIK_PUB_HTTPS=443
+        fi
+        # Rede criada pela stack = twobrain_traefik-net (nome real no Swarm)
+        TRAEFIK_SWARM_NET="twobrain_traefik-net"
+        cat >> $INSTALL_DIR/docker-compose.yml <<TRAEFIK_EOF
+
   traefik:
     image: traefik:latest
-    networks: 
+    networks:
       - traefik-net
     ports:
-      - "80:80"
-      - "443:443"
+      - target: 80
+        published: $TRAEFIK_PUB_HTTP
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: $TRAEFIK_PUB_HTTPS
+        protocol: tcp
+        mode: host
     command:
       - --api.dashboard=true
       - --api.insecure=false
       - --providers.docker=false
       - --providers.swarm=true
       - --providers.swarm.exposedbydefault=false
-      - --providers.swarm.network=traefik-net
+      - --providers.swarm.network=$TRAEFIK_SWARM_NET
       - --entrypoints.web.address=:80
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
       - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.le.acme.email=${EMAIL_SSL}
+      - --certificatesresolvers.le.acme.email=\${EMAIL_SSL}
       - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.le.acme.httpchallenge=true
       - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
@@ -390,7 +721,7 @@ services:
       - 'traefik.http.routers.traefik.rule=Host(`${DOMAIN_TRAEFIK}`)'
       - 'traefik.http.routers.traefik.service=api@internal'
       - 'traefik.http.routers.traefik.middlewares=auth'
-      - 'traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_AUTH}' 
+      - 'traefik.http.middlewares.auth.basicauth.users=\${TRAEFIK_AUTH}' 
       - 'traefik.http.routers.traefik.tls.certresolver=le'
     deploy:
       mode: replicated
@@ -402,6 +733,10 @@ services:
         condition: on-failure
         delay: 5s
         max_attempts: 3
+TRAEFIK_EOF
+    fi
+
+    cat >> $INSTALL_DIR/docker-compose.yml <<'PORTAINER_EOF'
 
   portainer:
     image: portainer/portainer-ce:latest
@@ -424,8 +759,7 @@ services:
         - traefik.http.services.portainer.loadbalancer.server.port=9000
       restart_policy:
         condition: on-failure
-COMPOSE_EOF
-
+PORTAINER_EOF
 
     [ "$NEED_POSTGRES" = true ] && cat >> $INSTALL_DIR/docker-compose.yml <<'PG_EOF'
 
@@ -475,6 +809,7 @@ REDIS_EOF
       MYSQL_PASSWORD: ${WP_DB_PASS}
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./mysql/conf.d/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
     deploy:
       mode: replicated
       replicas: 1
@@ -820,15 +1155,35 @@ deploy_stack() {
     echo -e "${CYAN}══════════════════════════════════${NC}\n"
     
     cd $INSTALL_DIR
-    set -a; source .env; set +a
+    set -a; source .env 2>/dev/null || true; set +a
+    
+    # Garantir que variáveis de domínio estão no ambiente (evita Host(``) e "no domain was given")
+    if [ -z "$DOMAIN_PORTAINER" ]; then
+        log_error "Variáveis de domínio vazias. Edite $INSTALL_DIR/.env e defina DOMAIN_PORTAINER, DOMAIN_N8N, etc., ou execute o instalador novamente."
+        exit 1
+    fi
     
     if docker stack ls | grep -q twobrain; then
         log_warn "Stack existente detectada. Atualizando..."
     fi
 
-    if ! docker network inspect traefik-net >/dev/null 2>&1; then
-        log_info "Criando rede externa 'traefik-net'..."
-        docker network create --driver=overlay --attachable traefik-net
+    # Rede: só criar/checar quando usamos proxy EXTERNO (Coolify). Nosso Traefik = rede definida no compose (twobrain_traefik-net)
+    if [ "$USE_EXISTING_TRAEFIK" = true ]; then
+        if docker network inspect traefik-net >/dev/null 2>&1; then
+            log_info "Rede 'traefik-net' já existe (proxy existente). Usando-a."
+        else
+            log_info "Criando rede 'traefik-net' (proxy existente)..."
+            if ! docker network create --driver overlay --attachable --subnet 172.25.0.0/24 traefik-net 2>/dev/null; then
+                log_error "Não foi possível criar traefik-net. Crie manualmente: docker network create --driver overlay --subnet 172.25.0.0/24 --attachable traefik-net"
+                exit 1
+            fi
+        fi
+    else
+        echo -e "${CYAN}Redes overlay atuais no Swarm:${NC}"
+        list_overlay_networks || true
+        echo -e "${CYAN}Nossa rede (twobrain_traefik-net) usará:${NC} ${WHITE}172.25.0.0/24${NC}"
+        echo -e "  ${YELLOW}Se aparecer erro 'Pool overlaps': outra rede já usa essa faixa. Rode diagnose-docker-networks.sh e escolha outra subnet.${NC}"
+        log_info "Rede será criada pela stack com subnet 172.25.0.0/24"
     fi
 
     log_info "Implantando stack TWOBRAIN..."
@@ -893,8 +1248,40 @@ echo "=== Manutenção concluída ===" >> "$LOG"
 MAINT_EOF
     
     chmod +x "$MAINT_SCRIPT"
-    (crontab -l 2>/dev/null | grep -v "$MAINT_SCRIPT"; echo "0 3 * * * $MAINT_SCRIPT") | crontab -
-    log_info "Script de manutenção instalado (Diário 03:00)"
+    # Crontab: uso de arquivo temporário para evitar falha quando não existe crontab (exit 1)
+    if command -v crontab >/dev/null 2>&1; then
+        CRON_TMP=$(mktemp 2>/dev/null || echo "/tmp/twobrain_cron_$$")
+        (crontab -l 2>/dev/null || true) | grep -v "twobrain-maintenance" > "${CRON_TMP}.new" || true
+        echo "0 3 * * * $MAINT_SCRIPT" >> "${CRON_TMP}.new"
+        if crontab "${CRON_TMP}.new" 2>/dev/null; then
+            log_info "Script de manutenção instalado (Diário 03:00)"
+        else
+            log_warn "Crontab não instalado (verifique se o serviço cron está disponível)"
+        fi
+        rm -f "${CRON_TMP}" "${CRON_TMP}.new" 2>/dev/null || true
+    else
+        log_warn "Comando crontab não encontrado; agendamento manual necessário"
+    fi
+}
+
+install_logs_script() {
+    LOGS_SCRIPT="/usr/local/bin/twobrain-logs.sh"
+    cat > "$LOGS_SCRIPT" <<'LOGS_EOF'
+#!/usr/bin/env bash
+# TWOBRAIN - Ver logs da stack (Traefik por padrão)
+# Uso: twobrain-logs.sh [serviço]   ou   twobrain-logs.sh list
+STACK=twobrain
+if [ "$1" = "list" ] || [ "$1" = "ls" ]; then
+    docker stack services "$STACK"
+    echo ""
+    echo "Exemplo: twobrain-logs.sh traefik   ou   twobrain-logs.sh portainer"
+    exit 0
+fi
+SVC="${1:-traefik}"
+docker service logs -f "${STACK}_${SVC}" 2>/dev/null || echo "Serviço ${STACK}_${SVC} não encontrado. Use: twobrain-logs.sh list"
+LOGS_EOF
+    chmod +x "$LOGS_SCRIPT"
+    log_info "Script de logs instalado: $LOGS_SCRIPT"
 }
 
 generate_report() {
@@ -903,12 +1290,20 @@ generate_report() {
     echo -e "${WHITE}${BOLD}   TWOBRAIN - IMPLANTAÇÃO CONCLUÍDA!${NC}"
     echo -e "${MAGENTA}════════════════════════════════════════════${NC}\n"
     
-    SERVER_IP=$(hostname -I | awk '{print $1}')
+    SERVER_IP=$(get_public_ipv4)
     
     echo -e "${CYAN}📋 INFORMAÇÕES DO SISTEMA${NC}"
     echo -e "${GREEN}✓${NC} Docker Swarm: ${WHITE}ATIVO${NC}"
-    echo -e "${GREEN}✓${NC} IP do Servidor: ${WHITE}${SERVER_IP}${NC}"
-    echo -e "${GREEN}✓${NC} Manutenção: ${WHITE}DIÁRIA 03:00${NC}\n"
+    echo -e "${GREEN}✓${NC} IP do Servidor (público para DNS): ${WHITE}${SERVER_IP}${NC}"
+    echo -e "${GREEN}✓${NC} Manutenção: ${WHITE}DIÁRIA 03:00${NC}"
+    if [ "$USE_EXISTING_TRAEFIK" = true ]; then
+        echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Usando Traefik/Coolify existente${NC} (stack sem serviço Traefik)"
+    elif [ "$TRAEFIK_ALT_PORTS" = true ]; then
+        echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Traefik em portas 8081 (HTTP) e 8444 (HTTPS)${NC}"
+    else
+        echo -e "${GREEN}✓${NC} Proxy: ${WHITE}Traefik próprio em 80/443${NC}"
+    fi
+    echo ""
     
     echo -e "${CYAN}🌐 CONFIGURE ESTES DNS (Tipo A):${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -961,18 +1356,46 @@ generate_report() {
         echo -e "  Pass: ${WHITE}$PGADMIN_PASS${NC}\n"
     }
     
+    [ "$NEED_MYSQL" = true ] && {
+        echo -e "MySQL: InnoDB buffer pool ${WHITE}${MYSQL_INNODB_BUFFER_POOL_SIZE}${NC}\n"
+    }
+    
     echo -e "${CYAN}📁 ARQUIVOS${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  Config: ${WHITE}$INSTALL_DIR/.env${NC}"
     echo -e "  Compose: ${WHITE}$INSTALL_DIR/docker-compose.yml${NC}"
-    echo -e "  Manutenção: ${WHITE}/usr/local/bin/twobrain-maintenance.sh${NC}\n"
+    echo -e "  Tutorial Cloudflare + portas: ${WHITE}$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt${NC}"
+    echo -e "  Manutenção: ${WHITE}/usr/local/bin/twobrain-maintenance.sh${NC}"
+    echo -e "  Logs: ${WHITE}/usr/local/bin/twobrain-logs.sh${NC}\n"
+    
+    echo -e "${CYAN}☁️  CLOUDFLARE E PORTAS (resumo)${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  No painel da VPS/cloud, libere: ${WHITE}TCP 22, 80, 443, 8081, 8444${NC} (e 8080 se usar)"
+    echo -e "  Cloudflare: SSL ${WHITE}Full${NC} ou ${WHITE}Full (strict)${NC}; Proxy ${WHITE}laranja${NC} (Proxied) ou cinza (DNS only)"
+    echo -e "  Tutorial completo: ${WHITE}$INSTALL_DIR/CLOUDFLARE-E-PORTAS.txt${NC}\n"
+    
+    echo -e "${CYAN}📜 VER LOGS${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  Listar serviços:  ${WHITE}docker stack services twobrain${NC}"
+    if [ "$USE_EXISTING_TRAEFIK" != true ]; then
+        echo -e "  Logs Traefik:      ${WHITE}docker service logs -f twobrain_traefik${NC}"
+    fi
+    echo -e "  Ou use o script:  ${WHITE}twobrain-logs.sh list${NC}     (lista serviços)"
+    echo -e "                    ${WHITE}twobrain-logs.sh portainer${NC} (ou n8n_editor, etc.)\n"
     
     echo -e "${CYAN}⏱️  PRÓXIMOS PASSOS${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "1. Configure os registros DNS acima"
-    echo -e "2. Aguarde 2-5 minutos para os serviços subirem"
-    echo -e "3. Aguarde até 10 minutos para os certificados SSL"
-    echo -e "4. Teste os acessos: ${WHITE}https://$DOMAIN_PORTAINER${NC}\n"
+    if [ "$USE_EXISTING_TRAEFIK" = true ]; then
+        echo -e "1. No Coolify/proxy existente: adicione os hosts (portainer, n8n, etc.) apontando para os serviços desta stack na rede traefik-net."
+        echo -e "2. Ou configure DNS (Tipo A) para ${WHITE}${SERVER_IP}${NC} e use o proxy existente para rotear por host."
+    else
+        echo -e "1. No Cloudflare: proxy laranja (Proxied) ou cinza (DNS only); SSL Full ou Full (strict)"
+        echo -e "2. No painel da VPS/cloud: libere ${WHITE}TCP 22, 80, 443, 8081, 8444${NC} (sem isso não há autenticação/acesso)"
+        echo -e "3. Configure os registros DNS acima apontando para ${WHITE}${SERVER_IP}${NC}"
+        [ "$TRAEFIK_ALT_PORTS" = true ] && echo -e "   ${YELLOW}Acesso direto (portas alt): http://${SERVER_IP}:8081 e https://${SERVER_IP}:8444${NC}"
+    fi
+    echo -e "4. Aguarde 2-5 min para os serviços subirem; até 10 min para certificados SSL"
+    echo -e "5. Teste: ${WHITE}https://$DOMAIN_PORTAINER${NC}\n"
     
     echo -e "${GREEN}${BOLD}✓ Instalação concluída!${NC}\n"
     echo -e "${MAGENTA}════════════════════════════════════════════${NC}\n"
@@ -983,11 +1406,14 @@ main() {
     load_state
     ask_cleanup
     install_base_deps
+    open_firewall_ports
+    ask_traefik_mode
     selection_menu
     collect_info
     generate_files
     deploy_stack
     install_maintenance_script
+    install_logs_script
     generate_report
 }
 
