@@ -749,6 +749,8 @@ ask_traefik_mode() {
         TRAEFIK_EXTERNAL_NETWORK="${STACK_NAME}_traefik-net"
         log_info "Modo: Traefik próprio em 80/443."
     fi
+    # Garantir rede definida quando não usamos proxy existente
+    [ -z "$TRAEFIK_EXTERNAL_NETWORK" ] && TRAEFIK_EXTERNAL_NETWORK="${STACK_NAME}_traefik-net"
     sleep 1
 }
 
@@ -843,6 +845,7 @@ collect_info() {
     read -p "  [padrão: traefik]: " SUB
     SUB=${SUB:-traefik}
     DOMAIN_TRAEFIK="${SUB}.${BASE_DOMAIN}"
+    DOMAIN_TRAEFIK="${DOMAIN_TRAEFIK:-traefik.${BASE_DOMAIN}}"
     echo -e "  ${GREEN}→${NC} ${WHITE}${DOMAIN_TRAEFIK}${NC}\n"
     
     [ "$ENABLE_MINIO" = true ] && {
@@ -1008,6 +1011,15 @@ generate_files() {
     if [ -z "$BASE_DOMAIN" ] || [ -z "$DOMAIN_PORTAINER" ]; then
         log_error "Variáveis de domínio vazias (BASE_DOMAIN/DOMAIN_PORTAINER). Execute a instalação novamente e informe os domínios."
         exit 1
+    fi
+    # Quando usamos Traefik próprio, DOMAIN_TRAEFIK é obrigatório (evita "no domain was given")
+    if [ "$USE_EXISTING_TRAEFIK" != true ]; then
+        DOMAIN_TRAEFIK="${DOMAIN_TRAEFIK:-traefik.${BASE_DOMAIN}}"
+        if [ -z "$DOMAIN_TRAEFIK" ]; then
+            log_error "DOMAIN_TRAEFIK está vazio. Defina em $INSTALL_DIR/.env ou execute a instalação novamente e informe o subdomínio do Traefik."
+            exit 1
+        fi
+        log_info "Dashboard Traefik: ${DOMAIN_TRAEFIK}"
     fi
     
     mkdir -p $INSTALL_DIR/traefik
@@ -1175,6 +1187,7 @@ TUTORIAL_EOF
 
 generate_compose() {
     # Rede: proxy existente = external; nosso Traefik = rede no compose com subnet fixa (evita overlap com outras redes overlay)
+    # Conexões entre serviços usam ${STACK_NAME}_<serviço> (ex: twobrain_mysql) para múltiplas instalações no mesmo servidor.
     if [ "$USE_EXISTING_TRAEFIK" = true ]; then
         cat > $INSTALL_DIR/docker-compose.yml <<NET_EXT_EOF
 networks:
@@ -1453,7 +1466,7 @@ MINIO_EOF
         mode: host
     environment:
       - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=n8n_user
@@ -1463,7 +1476,7 @@ MINIO_EOF
       - EXECUTIONS_MODE=queue
       - N8N_PROXY_HOPS=1
       - N8N_TRUST_PROXY=true
-      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_HOST=\${STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -1511,7 +1524,7 @@ MINIO_EOF
         mode: host
     environment:
       - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=n8n_user
@@ -1521,7 +1534,7 @@ MINIO_EOF
       - EXECUTIONS_MODE=queue
       - N8N_PROXY_HOPS=1
       - N8N_TRUST_PROXY=true
-      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_HOST=\${STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -1551,7 +1564,7 @@ MINIO_EOF
       - traefik-net
     environment:
       - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_HOST=\${STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_DATABASE=n8n
       - DB_POSTGRESDB_USER=n8n_user
@@ -1559,7 +1572,7 @@ MINIO_EOF
       - N8N_EDITOR_BASE_URL=https://${DOMAIN_N8N}
       - WEBHOOK_URL=https://${DOMAIN_N8N_WEBHOOK}
       - EXECUTIONS_MODE=queue
-      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_HOST=\${STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -1602,9 +1615,9 @@ N8N_EOF
       SERVER_URL: https://${DOMAIN_EVOLUTION}
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
       DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: postgresql://evolution:${PG_PASS_EVO}@postgres:5432/evolution
+      DATABASE_CONNECTION_URI: postgresql://evolution:\${PG_PASS_EVO}@\${STACK_NAME}_postgres:5432/evolution
       CACHE_REDIS_ENABLED: "true"
-      CACHE_REDIS_URI: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CACHE_REDIS_URI: redis://:\${REDIS_PASSWORD}@\${STACK_NAME}_redis:6379/1
     deploy:
       mode: replicated
       replicas: 1
@@ -1632,7 +1645,7 @@ EVO_EOF
         protocol: tcp
         mode: host
     environment:
-      DATABASE_URL: postgresql://typebot:${PG_PASS_TYPEBOT}@postgres:5432/typebot
+      DATABASE_URL: postgresql://typebot:\${PG_PASS_TYPEBOT}@\${STACK_NAME}_postgres:5432/typebot
       NEXTAUTH_URL: https://${DOMAIN_TYPEBOT}
       NEXT_PUBLIC_VIEWER_URL: https://${DOMAIN_TYPEBOT_VIEWER}
       ENCRYPTION_SECRET: ${TYPEBOT_ENC_KEY}
@@ -1666,7 +1679,7 @@ EVO_EOF
         protocol: tcp
         mode: host
     environment:
-      DATABASE_URL: postgresql://typebot:${PG_PASS_TYPEBOT}@postgres:5432/typebot
+      DATABASE_URL: postgresql://typebot:\${PG_PASS_TYPEBOT}@\${STACK_NAME}_postgres:5432/typebot
       NEXT_PUBLIC_VIEWER_URL: https://${DOMAIN_TYPEBOT_VIEWER}
       ENCRYPTION_SECRET: ${TYPEBOT_ENC_KEY}
     deploy:
@@ -1696,7 +1709,7 @@ TYPEBOT_EOF
         protocol: tcp
         mode: host
     environment:
-      WORDPRESS_DB_HOST: mysql
+      WORDPRESS_DB_HOST: \${STACK_NAME}_mysql
       WORDPRESS_DB_NAME: wordpress
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: ${WP_DB_PASS}
@@ -1789,7 +1802,7 @@ PGADMIN_EOF
         protocol: tcp
         mode: host
     environment:
-      PMA_HOST: mysql
+      PMA_HOST: \${STACK_NAME}_mysql
       PMA_PORT: 3306
     deploy:
       mode: replicated
@@ -1821,6 +1834,10 @@ deploy_stack() {
     # Garantir que variáveis de domínio estão no ambiente (evita Host(``) e "no domain was given")
     if [ -z "$DOMAIN_PORTAINER" ]; then
         log_error "Variáveis de domínio vazias. Edite $INSTALL_DIR/.env e defina DOMAIN_PORTAINER, DOMAIN_N8N, etc., ou execute o instalador novamente."
+        exit 1
+    fi
+    if [ "$USE_EXISTING_TRAEFIK" != true ] && [ -z "$DOMAIN_TRAEFIK" ]; then
+        log_error "DOMAIN_TRAEFIK está vazio no .env. O Traefik precisa de um host para o dashboard. Edite $INSTALL_DIR/.env e defina DOMAIN_TRAEFIK (ex: traefik.seudominio.com) ou execute o instalador novamente."
         exit 1
     fi
     
@@ -2140,7 +2157,9 @@ generate_report() {
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  Deploy log: ${WHITE}$INSTALL_DIR/${STACK_NAME}-deploy.log${NC}"
     echo -e "  Serviços:   ${WHITE}docker stack services ${STACK_NAME}${NC}"
-    echo -e "  Logs proxy: ${WHITE}docker service logs -f ${STACK_NAME}_traefik${NC}"
+    if [ "$USE_EXISTING_TRAEFIK" != true ]; then
+        echo -e "  Logs proxy: ${WHITE}docker service logs -f ${STACK_NAME}_traefik${NC}"
+    fi
     echo -e "  Acme:       ${WHITE}$INSTALL_DIR/traefik/acme.json${NC}\n"
     if [ "$EXPOSE_DB_PORTS" != true ]; then
         echo -e "${YELLOW}Observação:${NC} portas de banco não foram expostas no host (modo integração)."
