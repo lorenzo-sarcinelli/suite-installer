@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -Eeo pipefail
 
 on_unexpected_error() {
     local exit_code=$?
@@ -16,6 +16,13 @@ on_unexpected_error() {
         echo "exit_code: ${exit_code}"
         echo ""
     } >> "${install_dir}/${stack_name}-installer-error.log" 2>/dev/null || true
+    {
+        echo "==== $(date) ===="
+        echo "line: ${line_no}"
+        echo "command: ${cmd}"
+        echo "exit_code: ${exit_code}"
+        echo ""
+    } >> "/tmp/${stack_name}-installer-error.log" 2>/dev/null || true
     exit "${exit_code}"
 }
 
@@ -42,7 +49,7 @@ TRAEFIK_CERTRESOLVER_NAME="le"
 ENABLE_MINIO=false; ENABLE_N8N=false; ENABLE_TYPEBOT=false
 ENABLE_EVOLUTION=false; ENABLE_WORDPRESS=false; ENABLE_RABBIT=false
 ENABLE_PGADMIN=false; ENABLE_PMA=false
-NEED_POSTGRES=false; NEED_MYSQL=false; NEED_REDIS=false
+NEED_POSTGRES=true; NEED_MYSQL=true; NEED_REDIS=true
 PREVIOUS_INSTALL=false
 # Traefik: usar proxy existente (Coolify/etc) ou próprio (80/443 ou portas alternativas)
 USE_EXISTING_TRAEFIK=false
@@ -52,6 +59,8 @@ USE_SELF_SIGNED_CERT=false
 SWARM_ALREADY_ACTIVE=false
 INTEGRATE_WITH_EXISTING_SWARM=false
 EXPOSE_DB_PORTS=true
+RESET_STACK_VOLUMES_ON_DEPLOY=false
+DEPLOY_DATA_POLICY_TEXT="incremental (preserva volumes da stack)"
 
 # Perfil de portas publicadas no host (ajustado conforme modo Traefik)
 TRAEFIK_HTTP_PORT=80
@@ -483,13 +492,23 @@ ask_cleanup() {
     
     if [ "$PREVIOUS_INSTALL" = true ]; then
         echo -e "${YELLOW}⚠ Instalação existente detectada${NC}\n"
-        echo "1) 🔄 Reinstalar stack (zera volumes da stack)"
-        echo "2) 🗑️  Limpeza total (REMOVE TUDO)"
-        echo "3) ❌ Sair"
-        read -p "Opção [1-3]: " OPT
+        echo "1) ➕ Atualizar/adicionar serviços (preserva dados) ${GREEN}[recomendado]${NC}"
+        echo "2) 🔄 Reinstalar stack (zera volumes da stack)"
+        echo "3) 🗑️  Limpeza total (REMOVE TUDO)"
+        echo "4) ❌ Sair"
+        read -p "Opção [1-4, padrão: 1]: " OPT
+        OPT=${OPT:-1}
         
         case $OPT in
+            1)
+                RESET_STACK_VOLUMES_ON_DEPLOY=false
+                DEPLOY_DATA_POLICY_TEXT="incremental (preserva volumes da stack)"
+                ;;
             2)
+                RESET_STACK_VOLUMES_ON_DEPLOY=true
+                DEPLOY_DATA_POLICY_TEXT="reinstalação limpa (volumes da stack zerados)"
+                ;;
+            3)
                 read -p "Digite 'APAGAR TUDO' para confirmar: " CONFIRM
                 [ "$CONFIRM" == "APAGAR TUDO" ] && {
                     log_warn "Destruindo ambiente..."
@@ -508,9 +527,11 @@ ask_cleanup() {
                     sleep 2
                 } || exit 0
                 ;;
-            3) exit 0 ;;
+            4) exit 0 ;;
         esac
     else
+        RESET_STACK_VOLUMES_ON_DEPLOY=false
+        DEPLOY_DATA_POLICY_TEXT="nova instalação"
         mkdir -p "$INSTALL_DIR"
     fi
 }
@@ -544,7 +565,10 @@ install_base_deps() {
     if ! docker info 2>/dev/null | grep -q "Swarm: active"; then
         log_info "Inicializando Docker Swarm..."
         SWARM_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' | head -n1)
-        [ -z "$SWARM_ADDR" ] && SWARM_ADDR=$(hostname -i 2>/dev/null) || SWARM_ADDR="127.0.0.1"
+        if [ -z "$SWARM_ADDR" ]; then
+            SWARM_ADDR=$(hostname -i 2>/dev/null | awk '{print $1}' | head -n1)
+        fi
+        [ -z "$SWARM_ADDR" ] && SWARM_ADDR="127.0.0.1"
         docker swarm init --advertise-addr "$SWARM_ADDR"
         log_info "Swarm ativo"
         SWARM_ALREADY_ACTIVE=false
@@ -656,17 +680,43 @@ build_port_items() {
     add_port_item 22 "SSH"
     add_port_item "$TRAEFIK_HTTP_PORT" "Traefik HTTP"
     add_port_item "$TRAEFIK_HTTPS_PORT" "Traefik HTTPS"
-    [ "$EXPOSE_DB_PORTS" = true ] && [ "$NEED_MYSQL" = true ] && add_port_item "$MYSQL_PUBLISHED_PORT" "MySQL"
-    [ "$EXPOSE_DB_PORTS" = true ] && [ "$NEED_POSTGRES" = true ] && add_port_item "$POSTGRES_PUBLISHED_PORT" "PostgreSQL"
-    [ "$EXPOSE_DB_PORTS" = true ] && [ "$NEED_REDIS" = true ] && add_port_item "$REDIS_PUBLISHED_PORT" "Redis"
-    [ "$ENABLE_MINIO" = true ] && { add_port_item "$MINIO_API_PUBLISHED_PORT" "MinIO API"; add_port_item "$MINIO_CONSOLE_PUBLISHED_PORT" "MinIO Console"; }
-    [ "$ENABLE_N8N" = true ] && { add_port_item "$N8N_EDITOR_PUBLISHED_PORT" "N8N Editor"; add_port_item "$N8N_WEBHOOK_PUBLISHED_PORT" "N8N Webhook"; }
-    [ "$ENABLE_EVOLUTION" = true ] && add_port_item "$EVOLUTION_PUBLISHED_PORT" "Evolution API"
-    [ "$ENABLE_TYPEBOT" = true ] && { add_port_item "$TYPEBOT_BUILDER_PUBLISHED_PORT" "Typebot Builder"; add_port_item "$TYPEBOT_VIEWER_PUBLISHED_PORT" "Typebot Viewer"; }
-    [ "$ENABLE_WORDPRESS" = true ] && add_port_item "$WORDPRESS_PUBLISHED_PORT" "WordPress"
-    [ "$ENABLE_RABBIT" = true ] && { add_port_item "$RABBIT_AMQP_PUBLISHED_PORT" "RabbitMQ AMQP"; add_port_item "$RABBIT_MGMT_PUBLISHED_PORT" "RabbitMQ Management"; }
-    [ "$ENABLE_PGADMIN" = true ] && add_port_item "$PGADMIN_PUBLISHED_PORT" "pgAdmin"
-    [ "$ENABLE_PMA" = true ] && add_port_item "$PMA_PUBLISHED_PORT" "phpMyAdmin"
+    if [ "$EXPOSE_DB_PORTS" = true ] && [ "$NEED_MYSQL" = true ]; then
+        add_port_item "$MYSQL_PUBLISHED_PORT" "MySQL"
+    fi
+    if [ "$EXPOSE_DB_PORTS" = true ] && [ "$NEED_POSTGRES" = true ]; then
+        add_port_item "$POSTGRES_PUBLISHED_PORT" "PostgreSQL"
+    fi
+    if [ "$EXPOSE_DB_PORTS" = true ] && [ "$NEED_REDIS" = true ]; then
+        add_port_item "$REDIS_PUBLISHED_PORT" "Redis"
+    fi
+    if [ "$ENABLE_MINIO" = true ]; then
+        add_port_item "$MINIO_API_PUBLISHED_PORT" "MinIO API"
+        add_port_item "$MINIO_CONSOLE_PUBLISHED_PORT" "MinIO Console"
+    fi
+    if [ "$ENABLE_N8N" = true ]; then
+        add_port_item "$N8N_EDITOR_PUBLISHED_PORT" "N8N Editor"
+        add_port_item "$N8N_WEBHOOK_PUBLISHED_PORT" "N8N Webhook"
+    fi
+    if [ "$ENABLE_EVOLUTION" = true ]; then
+        add_port_item "$EVOLUTION_PUBLISHED_PORT" "Evolution API"
+    fi
+    if [ "$ENABLE_TYPEBOT" = true ]; then
+        add_port_item "$TYPEBOT_BUILDER_PUBLISHED_PORT" "Typebot Builder"
+        add_port_item "$TYPEBOT_VIEWER_PUBLISHED_PORT" "Typebot Viewer"
+    fi
+    if [ "$ENABLE_WORDPRESS" = true ]; then
+        add_port_item "$WORDPRESS_PUBLISHED_PORT" "WordPress"
+    fi
+    if [ "$ENABLE_RABBIT" = true ]; then
+        add_port_item "$RABBIT_AMQP_PUBLISHED_PORT" "RabbitMQ AMQP"
+        add_port_item "$RABBIT_MGMT_PUBLISHED_PORT" "RabbitMQ Management"
+    fi
+    if [ "$ENABLE_PGADMIN" = true ]; then
+        add_port_item "$PGADMIN_PUBLISHED_PORT" "pgAdmin"
+    fi
+    if [ "$ENABLE_PMA" = true ]; then
+        add_port_item "$PMA_PUBLISHED_PORT" "phpMyAdmin"
+    fi
 }
 
 # Libera portas no firewall conforme modo Traefik e serviços habilitados
@@ -833,11 +883,63 @@ selection_menu() {
         esac
     done
     
-    # Determinar dependências
-    NEED_POSTGRES=false; NEED_MYSQL=false; NEED_REDIS=false
-    ([ "$ENABLE_N8N" = true ] || [ "$ENABLE_TYPEBOT" = true ] || [ "$ENABLE_EVOLUTION" = true ] || [ "$ENABLE_PGADMIN" = true ]) && NEED_POSTGRES=true
-    ([ "$ENABLE_N8N" = true ] || [ "$ENABLE_TYPEBOT" = true ] || [ "$ENABLE_EVOLUTION" = true ]) && NEED_REDIS=true
-    ([ "$ENABLE_WORDPRESS" = true ] || [ "$ENABLE_PMA" = true ]) && NEED_MYSQL=true
+    recalculate_dependencies
+}
+
+recalculate_dependencies() {
+    # Regra do projeto: bases sempre presentes para permitir instalação incremental sem crash.
+    NEED_POSTGRES=true
+    NEED_REDIS=true
+    NEED_MYSQL=true
+}
+
+wait_for_service_running() {
+    local service_name="$1"
+    local timeout_seconds="${2:-180}"
+    local interval=3
+    local elapsed=0
+    local replicas running desired
+
+    while [ "$elapsed" -lt "$timeout_seconds" ]; do
+        replicas=$(docker service ls --format '{{.Name}} {{.Replicas}}' 2>/dev/null | awk -v s="$service_name" '$1==s{print $2}')
+        if [ -n "$replicas" ]; then
+            running="${replicas%/*}"
+            desired="${replicas#*/}"
+            if [ "${running:-0}" -ge 1 ] && [ "${desired:-0}" -ge 1 ]; then
+                return 0
+            fi
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+    return 1
+}
+
+force_restart_if_unhealthy() {
+    local service_name="$1"
+    local tries=3
+    local i=1
+
+    docker service inspect "$service_name" >/dev/null 2>&1 || return 0
+    wait_for_service_running "$service_name" 45 && return 0
+
+    while [ "$i" -le "$tries" ]; do
+        log_warn "Serviço ${service_name} sem réplicas saudáveis. Tentando reiniciar (${i}/${tries})..."
+        docker service update --force "$service_name" >/dev/null 2>&1 || true
+        wait_for_service_running "$service_name" 60 && return 0
+        i=$((i + 1))
+    done
+
+    log_warn "Serviço ${service_name} ainda instável após tentativas de reinício."
+    return 1
+}
+
+pg_admin_exec() {
+    local pg_container="$1"
+    shift
+    # A imagem do Postgres foi inicializada com POSTGRES_USER=n8n_user.
+    # Em alguns ambientes a role "postgres" não está disponível para login.
+    docker exec "$pg_container" psql -U n8n_user -d postgres "$@"
 }
 
 collect_info() {
@@ -1495,7 +1597,7 @@ EOF
     cat >> "$INSTALL_DIR/docker-compose.yml" <<PG_EOF
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     networks: 
       - traefik-net
 ${POSTGRES_PORTS_BLOCK}
@@ -2036,7 +2138,11 @@ deploy_stack() {
         exit 1
     fi
     
-    reset_stack_volumes
+    if [ "$RESET_STACK_VOLUMES_ON_DEPLOY" = true ]; then
+        reset_stack_volumes
+    else
+        log_info "Modo incremental: preservando volumes da stack ${STACK_NAME}."
+    fi
 
     # Rede: só criar/checar quando usamos proxy EXTERNO (Coolify). Nosso Traefik = rede definida no compose (<stack>_traefik-net)
     if [ "$USE_EXISTING_TRAEFIK" = true ]; then
@@ -2102,24 +2208,42 @@ deploy_stack() {
         done
         if [ -n "$PG_CONTAINER" ]; then
             for _ in $(seq 1 15); do
-                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "SELECT 1" >/dev/null 2>&1 && break
+                pg_admin_exec "$PG_CONTAINER" -c "SELECT 1" >/dev/null 2>&1 && break
                 sleep 2
             done
             log_info "Criando bancos adicionais (evolution, typebot) se necessário..."
             if [ "$ENABLE_EVOLUTION" = true ]; then
                 EVO_PASS_SQL="${PG_PASS_EVO//\'/\'\'}"
-                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE USER evolution WITH PASSWORD '${EVO_PASS_SQL}';" 2>/dev/null || true
-                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
+                pg_admin_exec "$PG_CONTAINER" -tAc "SELECT 1 FROM pg_roles WHERE rolname='evolution'" 2>/dev/null | grep -q 1 || \
+                    pg_admin_exec "$PG_CONTAINER" -c "CREATE ROLE evolution LOGIN PASSWORD '${EVO_PASS_SQL}';" 2>/dev/null || true
+                # Em modo incremental, o usuário pode já existir com senha antiga.
+                pg_admin_exec "$PG_CONTAINER" -c "ALTER ROLE evolution WITH LOGIN PASSWORD '${EVO_PASS_SQL}';" 2>/dev/null || true
+                pg_admin_exec "$PG_CONTAINER" -tAc "SELECT 1 FROM pg_database WHERE datname='evolution'" 2>/dev/null | grep -q 1 || \
+                    pg_admin_exec "$PG_CONTAINER" -c "CREATE DATABASE evolution OWNER evolution;" 2>/dev/null || true
+                pg_admin_exec "$PG_CONTAINER" -c "ALTER DATABASE evolution OWNER TO evolution;" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U n8n_user -d evolution -c "GRANT ALL PRIVILEGES ON DATABASE evolution TO evolution;" 2>/dev/null || true
+                docker exec "$PG_CONTAINER" psql -U n8n_user -d evolution -c "CREATE EXTENSION IF NOT EXISTS vector;" 2>/dev/null || true
             fi
             if [ "$ENABLE_TYPEBOT" = true ]; then
                 TB_PASS_SQL="${PG_PASS_TYPEBOT//\'/\'\'}"
-                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE USER typebot WITH PASSWORD '${TB_PASS_SQL}';" 2>/dev/null || true
-                docker exec "$PG_CONTAINER" psql -U n8n_user -d postgres -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
+                pg_admin_exec "$PG_CONTAINER" -tAc "SELECT 1 FROM pg_roles WHERE rolname='typebot'" 2>/dev/null | grep -q 1 || \
+                    pg_admin_exec "$PG_CONTAINER" -c "CREATE ROLE typebot LOGIN PASSWORD '${TB_PASS_SQL}';" 2>/dev/null || true
+                pg_admin_exec "$PG_CONTAINER" -tAc "SELECT 1 FROM pg_database WHERE datname='typebot'" 2>/dev/null | grep -q 1 || \
+                    pg_admin_exec "$PG_CONTAINER" -c "CREATE DATABASE typebot OWNER typebot;" 2>/dev/null || true
             fi
         else
             log_warn "Container PostgreSQL da stack ${STACK_NAME} não encontrado; crie os usuários/bancos evolution e typebot manualmente se precisar."
         fi
     fi
+
+    # Instalações incrementais: garante recuperação automática dos serviços de app
+    # caso iniciem antes de Postgres/Redis estarem prontos.
+    [ "$ENABLE_EVOLUTION" = true ] && force_restart_if_unhealthy "${STACK_NAME}_evolution" || true
+    [ "$ENABLE_TYPEBOT" = true ] && force_restart_if_unhealthy "${STACK_NAME}_typebot-builder" || true
+    [ "$ENABLE_TYPEBOT" = true ] && force_restart_if_unhealthy "${STACK_NAME}_typebot-viewer" || true
+    [ "$ENABLE_N8N" = true ] && force_restart_if_unhealthy "${STACK_NAME}_n8n_editor" || true
+    [ "$ENABLE_N8N" = true ] && force_restart_if_unhealthy "${STACK_NAME}_n8n_webhook" || true
+    [ "$ENABLE_N8N" = true ] && force_restart_if_unhealthy "${STACK_NAME}_n8n_worker" || true
     
     log_info "Stack implantada com sucesso!"
     sleep 2
@@ -2203,7 +2327,7 @@ generate_report() {
     echo -e "${CYAN}📋 RESUMO DA IMPLANTAÇÃO${NC}"
     echo -e "${GREEN}✓${NC} Docker Swarm: ${WHITE}ATIVO${NC}"
     echo -e "${GREEN}✓${NC} Stack: ${WHITE}${STACK_NAME}${NC}"
-    echo -e "${GREEN}✓${NC} Política de dados: ${WHITE}reinstalação limpa (volumes da stack zerados)${NC}"
+    echo -e "${GREEN}✓${NC} Política de dados: ${WHITE}${DEPLOY_DATA_POLICY_TEXT}${NC}"
     echo -e "${GREEN}✓${NC} IP do Servidor (público para DNS): ${WHITE}${SERVER_IP}${NC}"
     echo -e "${GREEN}✓${NC} Manutenção: ${WHITE}DIÁRIA 03:00${NC}"
     if [ "$USE_EXISTING_TRAEFIK" = true ]; then
@@ -2401,15 +2525,22 @@ main() {
     [ "$EUID" -ne 0 ] && { echo -e "${RED}Execute como root${NC}"; exit 1; }
     mkdir -p "$INSTALL_DIR"
     load_state
+    recalculate_dependencies
+    # Fluxo interativo: evita encerrar instalador por retornos não críticos
+    # (ex.: grep sem match em detecções/menus) quando usuário instala serviço isolado.
+    set +e
     ask_stack_name
     ask_cleanup
     install_base_deps
     ask_swarm_integration_mode
     ask_traefik_mode
     selection_menu
+    recalculate_dependencies
     configure_port_profile
     open_firewall_ports
     collect_info
+    # A partir daqui, voltar ao modo estrito para etapas de geração/deploy.
+    set -e
     generate_files
     deploy_stack
     install_maintenance_script
